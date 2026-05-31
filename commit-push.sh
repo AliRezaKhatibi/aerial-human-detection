@@ -5,7 +5,7 @@ git status
 git add .
 
 # اولین commit
-git commit -m "🎉 Initial project structure
+git commit -m "🎉 Initial project structure"
 
 - Set up project directory structure
 - Add README, .gitignore, and configuration files
