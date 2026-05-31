@@ -1,17 +1,14 @@
-# دیدن وضعیت فایل‌ها
+# بررسی وضعیت
 git status
 
-# اضافه کردن همه فایل‌ها
+# اگر همه چیز خوب بود
 git add .
+Write-Host "Files added successfully" -ForegroundColor Green
 
-# اولین commit
-git commit -m "🎉 Initial project structure"
+# commit
+git commit -m "🎉 Initial project structure - Set up project directory structure - Add README, .gitignore, and configuration files - Create placeholder files for all modules - Add requirements and development dependencies - Configure CI/CD workflows and pre-commit hooks"
+Write-Host "Committed successfully" -ForegroundColor Green
 
-- Set up project directory structure
-- Add README, .gitignore, and configuration files
-- Create placeholder files for all modules
-- Add requirements and development dependencies
-- Configure CI/CD workflows and pre-commit hooks"
-
-# Push به گیت‌هاب
+# push به main
 git push -u origin main
+Write-Host "Pushed to GitHub successfully" -ForegroundColor Green
