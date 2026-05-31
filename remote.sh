@@ -1,1 +1,1 @@
-github.com:AliRezaKhatibi/aerial-human-detection.git
+https://github.com/AliRezaKhatibi/aerial-human-detection.git
