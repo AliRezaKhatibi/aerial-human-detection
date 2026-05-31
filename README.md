@@ -22,3 +22,18 @@ This project develops a high-performance system for detecting and tracking human
 🚧 **Under Development** - Phase 1 (Data Collection & Baseline)
 
 ## 🗂 Project Structure
+
+aerial-human-detection/
+├── data/ # Datasets and annotations
+├── notebooks/ # Research and experimentation
+├── src/ # Main source code
+│ ├── data/ # Data loading pipeline
+│ ├── models/ # Detection and tracking models
+│ ├── training/ # Training scripts
+│ ├── evaluation/ # Model evaluation
+│ ├── inference/ # Real-time inference
+│ └── gui/ # User interface
+├── configs/ # Model configurations
+├── tests/ # Unit and integration tests
+├── docs/ # Documentation
+└── results/ # Training outputs and reports
