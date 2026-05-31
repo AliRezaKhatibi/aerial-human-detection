@@ -1,3 +1,4 @@
+git init
 # بررسی وضعیت
 git status
 
