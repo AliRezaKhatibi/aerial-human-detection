@@ -25,7 +25,7 @@ try {
 
 # commit
 try {
-    git commit -m "Initial project structure - Set up project directory structure - Add README, .gitignore, and configuration files - Create placeholder files for all modules - Add requirements and development dependencies - Configure CI/CD workflows and pre-commit hooks"
+    git commit -m "Yousefi"
     Write-Host "Committed successfully" -ForegroundColor Green
 } catch {
     Write-Host "Error committing: $_" -ForegroundColor Red
