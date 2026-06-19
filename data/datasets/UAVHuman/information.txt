@@ -1,0 +1,10 @@
+کاربرد: تشخیص و ReID انسان در تصاویر هوایی
+
+سایت:
+https://github.com/sutdcv/UAV-Human
+
+مزایا:
+
+مناسب StrongSORT
+دارای اطلاعات هویتی افراد
+کمک به کاهش ID Switch

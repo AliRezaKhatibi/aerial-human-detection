@@ -1,0 +1,12 @@
+کاربرد: تشخیص و ردیابی در ویدئوهای پهپادی
+
+سایت:
+https://sites.google.com/view/daweidu/projects/uavdt
+دانلود:
+https://github.com/VisDrone/UAVDT
+
+مزایا:
+
+دارای ویدئو و Track ID
+مناسب برای ByteTrack و StrongSORT
+سناریوهای مختلف ارتفاع و زاویه دید
