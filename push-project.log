@@ -1,0 +1,14 @@
+Started: Thu 08/06/2026  1:51:05.14
+User: TAHA\taha5
+Computer: TAHA
+
+Lock acquired.
+
+[1/8] Switching to main
+Already on 'main'
+Your branch is up to date with 'origin/main'.
+
+[2/8] Checking Git identity
+ERROR: Git user.name is not configured for this Windows account.
+Run once:
+git config --global user.name "Your Name"

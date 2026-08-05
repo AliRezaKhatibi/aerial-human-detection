@@ -1,0 +1,26 @@
+Started: Thu 08/06/2026  1:43:07.62
+User: TAHA\taha5
+Computer: TAHA
+
+Lock acquired.
+
+[1/6] Repository status
+## main...origin/main
+?? README-shared-folder-workflow.txt
+?? push-project.log
+?? save-and-push.cmd
+?? shared-folder-git-scripts.zip
+?? update-project.cmd
+?? update-project.log
+
+[2/6] Saving local changes temporarily
+warning: in the working copy of 'README-shared-folder-workflow.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'push-project.log', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'save-and-push.cmd', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'update-project.cmd', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'update-project.log', LF will be replaced by CRLF the next time Git touches it
+Saved working directory and index state On main: Team auto-stash before update - taha5 - Thu 08/06/2026  1:43:07.84
+warning: failed to remove update-project.log: Invalid argument
+ERROR: Could not create a stash.
+The batch file cannot be found.
+The batch file cannot be found.
