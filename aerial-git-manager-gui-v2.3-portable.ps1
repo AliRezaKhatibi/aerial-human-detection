@@ -14,7 +14,7 @@ $ErrorActionPreference = "Stop"
 # ============================================================
 
 $AppName = "Aerial Human Detection"
-$Version = "2.2.0"
+$Version = "2.3.0"
 $DefaultRepo = ""
 $DefaultRemote = "origin"
 $DefaultBranch = "main"
@@ -154,54 +154,85 @@ function Invoke-GitAnimated {
         [Parameter(Mandatory = $true)] [string]$Phase
     )
 
-    $stdoutPath = Join-Path $script:WorkerRuntimePath ("git-out-" + [guid]::NewGuid().ToString("N") + ".txt")
-    $stderrPath = Join-Path $script:WorkerRuntimePath ("git-err-" + [guid]::NewGuid().ToString("N") + ".txt")
+    $argumentLine = ($Arguments | ForEach-Object {
+        ConvertTo-NativeArgument $_
+    }) -join " "
 
-    $argumentLine = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
     Write-WorkerLog ("git " + ($Arguments -join " "))
 
-    $process = Start-Process `
-        -FilePath "git.exe" `
-        -ArgumentList $argumentLine `
-        -WorkingDirectory $script:WorkerRepo `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $stdoutPath `
-        -RedirectStandardError $stderrPath `
-        -PassThru
+    # Use System.Diagnostics.Process directly. Start-Process can occasionally
+    # report a stale or incorrect ExitCode for very fast redirected Git
+    # commands in Windows PowerShell 5.1.
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "git.exe"
+    $startInfo.Arguments = $argumentLine
+    $startInfo.WorkingDirectory = $script:WorkerRepo
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+
+    if (-not $process.Start()) {
+        throw "Could not start Git."
+    }
+
+    # Read both streams asynchronously to avoid output-buffer deadlocks.
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
 
     $currentPercent = $StartPercent
-    $maximumAnimatedPercent = [Math]::Max($StartPercent, $EndPercent - 1)
+    $maximumAnimatedPercent = [Math]::Max(
+        $StartPercent,
+        $EndPercent - 1
+    )
 
-    while (-not $process.HasExited) {
-        Set-WorkerProgress -Percent $currentPercent -Status $Status -Phase $Phase
+    while (-not $process.WaitForExit(250)) {
+        Set-WorkerProgress `
+            -Percent $currentPercent `
+            -Status $Status `
+            -Phase $Phase
 
         if ($currentPercent -lt $maximumAnimatedPercent) {
             $currentPercent++
         }
-
-        Start-Sleep -Milliseconds 280
-        $process.Refresh()
     }
 
+    # A second WaitForExit ensures asynchronous stream handlers are complete
+    # before reading ExitCode and output.
     $process.WaitForExit()
 
-    foreach ($file in @($stdoutPath, $stderrPath)) {
-        if (Test-Path -LiteralPath $file) {
-            foreach ($line in @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue)) {
-                if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
-                    Write-WorkerLog ([string]$line)
+    $stdout = [string]$stdoutTask.Result
+    $stderr = [string]$stderrTask.Result
+    $exitCode = [int]$process.ExitCode
+
+    foreach ($content in @($stdout, $stderr)) {
+        if (-not [string]::IsNullOrWhiteSpace($content)) {
+            foreach ($line in ($content -split "\r?\n")) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    Write-WorkerLog $line
                 }
             }
-
-            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
         }
     }
 
-    if ($process.ExitCode -ne 0) {
-        throw "Git command failed: git $($Arguments -join ' ')"
+    if ($exitCode -ne 0) {
+        $details = (@($stderr, $stdout) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`r`n"
+
+        if ([string]::IsNullOrWhiteSpace($details)) {
+            $details = "Git returned exit code $exitCode without additional output."
+        }
+
+        throw "Git command failed: git $($Arguments -join ' ')`r`n$details"
     }
 
-    Set-WorkerProgress -Percent $EndPercent -Status $Status -Phase $Phase
+    Set-WorkerProgress `
+        -Percent $EndPercent `
+        -Status $Status `
+        -Phase $Phase
 }
 
 function Convert-LocalProgress {
@@ -991,7 +1022,7 @@ function Start-Gui {
                         <TextBlock x:Name="txtHeaderStatus" Text="Ready" Foreground="#93C5FD" FontWeight="SemiBold"/>
                     </Border>
                     <Border Background="#13251B" BorderBrush="#16A34A" BorderThickness="1" CornerRadius="16" Padding="12,6">
-                        <TextBlock Text="GUI V2.2" Foreground="#86EFAC" FontWeight="Bold"/>
+                        <TextBlock Text="GUI V2.3" Foreground="#86EFAC" FontWeight="Bold"/>
                     </Border>
                 </StackPanel>
             </Grid>
