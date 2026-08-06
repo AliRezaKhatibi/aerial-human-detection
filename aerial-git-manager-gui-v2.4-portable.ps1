@@ -14,7 +14,7 @@ $ErrorActionPreference = "Stop"
 # ============================================================
 
 $AppName = "Aerial Human Detection"
-$Version = "2.3.0"
+$Version = "2.4.0"
 $DefaultRepo = ""
 $DefaultRemote = "origin"
 $DefaultBranch = "main"
@@ -49,7 +49,22 @@ function Write-AtomicJson {
 }
 
 function Write-WorkerLog {
-    param([Parameter(Mandatory = $true)] [string]$Message)
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Message
+    )
+
+    # Native Git output can legitimately contain blank lines. Those lines
+    # must never be treated as a PowerShell parameter-binding failure.
+    if ([string]::IsNullOrEmpty($Message)) {
+        [System.IO.File]::AppendAllText(
+            $script:WorkerLogPath,
+            [Environment]::NewLine,
+            [System.Text.Encoding]::UTF8
+        )
+        return
+    }
 
     $timestamp = Get-Date -Format "HH:mm:ss"
     $line = "[$timestamp] $Message"
@@ -126,7 +141,13 @@ function Invoke-GitCapture {
     }
 
     foreach ($line in $output) {
-        Write-WorkerLog ([string]$line)
+        $textLine = [string]$line
+
+        if ([string]::IsNullOrWhiteSpace($textLine)) {
+            continue
+        }
+
+        Write-WorkerLog $textLine
     }
 
     if (($exitCode -ne 0) -and (-not $AllowFailure)) {
@@ -441,11 +462,32 @@ function Invoke-UpdateWorker {
         "Restoring local work..." "Restore"
 
     if ($stashCreated) {
-        $stashPop = Invoke-GitCapture -Arguments @("stash", "pop") -AllowFailure
+        # Apply first and drop only after a completely successful restore.
+        # This guarantees that the temporary backup remains available when
+        # a same-name file arrives from GitHub or another conflict occurs.
+        $stashApply = Invoke-GitCapture `
+            -Arguments @("stash", "apply", "stash@{0}") `
+            -AllowFailure
 
-        if ($stashPop.ExitCode -ne 0) {
-            throw "The project was updated, but restoring local work caused merge conflicts."
+        if ($stashApply.ExitCode -ne 0) {
+            $restoreDetails = @(
+                $stashApply.Output |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+                    ForEach-Object { [string]$_ }
+            ) -join [Environment]::NewLine
+
+            if ([string]::IsNullOrWhiteSpace($restoreDetails)) {
+                $restoreDetails = "Git could not restore the temporary stash."
+            }
+
+            throw (
+                "The project was updated, but local files could not be restored. " +
+                "The temporary stash was kept safely as stash@{0}.`r`n`r`n" +
+                $restoreDetails
+            )
         }
+
+        Invoke-GitCapture -Arguments @("stash", "drop", "stash@{0}") | Out-Null
     }
 
     Set-OperationProgress 100 $BasePercent $SpanPercent `
@@ -625,7 +667,12 @@ function Invoke-WorkerMain {
         }
     }
     catch {
-        $message = $_.Exception.Message
+        $message = [string]$_.Exception.Message
+
+        if ([string]::IsNullOrWhiteSpace($message)) {
+            $message = "An unknown Git operation error occurred."
+        }
+
         Write-WorkerLog "ERROR: $message"
         Set-WorkerProgress -Percent 100 -Status $message -Phase "Failed"
         Complete-Worker -Success $false -Message $message -ExitCode 1
@@ -1022,7 +1069,7 @@ function Start-Gui {
                         <TextBlock x:Name="txtHeaderStatus" Text="Ready" Foreground="#93C5FD" FontWeight="SemiBold"/>
                     </Border>
                     <Border Background="#13251B" BorderBrush="#16A34A" BorderThickness="1" CornerRadius="16" Padding="12,6">
-                        <TextBlock Text="GUI V2.3" Foreground="#86EFAC" FontWeight="Bold"/>
+                        <TextBlock Text="GUI V2.4" Foreground="#86EFAC" FontWeight="Bold"/>
                     </Border>
                 </StackPanel>
             </Grid>

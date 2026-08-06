@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "SCRIPT=%~dp0aerial-git-manager-gui-v2.3-portable.ps1"
+set "SCRIPT=%~dp0aerial-git-manager-gui-v2.4-portable.ps1"
 
 if not exist "%SCRIPT%" (
     echo ERROR: The GUI PowerShell file was not found:
