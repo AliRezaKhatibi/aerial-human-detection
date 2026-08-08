@@ -1,0 +1,8 @@
+Place your trained Ultralytics YOLO model in this folder.
+Recommended filename:
+
+    yolo26s_visdrone_best.pt
+
+The application accepts any .pt path through the GUI. If the model has exactly
+one class (for example {0: 'item'}), Aerial Person Studio maps that single class
+to the canonical project label "person" for pre-labeling and export.

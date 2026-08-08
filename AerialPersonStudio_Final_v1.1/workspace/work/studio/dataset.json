@@ -1,0 +1,1038 @@
+{
+  "version": 1,
+  "classes": [
+    "person"
+  ],
+  "splits": {
+    "train": [
+      {
+        "name": "ap_0000001.jpg",
+        "path": "work/studio/images/train/ap_0000001.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000002.jpg",
+        "path": "work/studio/images/train/ap_0000002.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000003.jpg",
+        "path": "work/studio/images/train/ap_0000003.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000004.jpg",
+        "path": "work/studio/images/train/ap_0000004.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000005.jpg",
+        "path": "work/studio/images/train/ap_0000005.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000006.jpg",
+        "path": "work/studio/images/train/ap_0000006.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000007.jpg",
+        "path": "work/studio/images/train/ap_0000007.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000008.jpg",
+        "path": "work/studio/images/train/ap_0000008.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000009.jpg",
+        "path": "work/studio/images/train/ap_0000009.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000010.jpg",
+        "path": "work/studio/images/train/ap_0000010.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000011.jpg",
+        "path": "work/studio/images/train/ap_0000011.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000012.jpg",
+        "path": "work/studio/images/train/ap_0000012.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000013.jpg",
+        "path": "work/studio/images/train/ap_0000013.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000014.jpg",
+        "path": "work/studio/images/train/ap_0000014.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000015.jpg",
+        "path": "work/studio/images/train/ap_0000015.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000016.jpg",
+        "path": "work/studio/images/train/ap_0000016.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000017.jpg",
+        "path": "work/studio/images/train/ap_0000017.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000018.jpg",
+        "path": "work/studio/images/train/ap_0000018.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000019.jpg",
+        "path": "work/studio/images/train/ap_0000019.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000020.jpg",
+        "path": "work/studio/images/train/ap_0000020.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_1",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000033.jpg",
+        "path": "work/studio/images/train/ap_0000033.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000034.jpg",
+        "path": "work/studio/images/train/ap_0000034.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000035.jpg",
+        "path": "work/studio/images/train/ap_0000035.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000036.jpg",
+        "path": "work/studio/images/train/ap_0000036.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000037.jpg",
+        "path": "work/studio/images/train/ap_0000037.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000038.jpg",
+        "path": "work/studio/images/train/ap_0000038.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000039.jpg",
+        "path": "work/studio/images/train/ap_0000039.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000040.jpg",
+        "path": "work/studio/images/train/ap_0000040.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000041.jpg",
+        "path": "work/studio/images/train/ap_0000041.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000042.jpg",
+        "path": "work/studio/images/train/ap_0000042.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000043.jpg",
+        "path": "work/studio/images/train/ap_0000043.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000044.jpg",
+        "path": "work/studio/images/train/ap_0000044.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000045.jpg",
+        "path": "work/studio/images/train/ap_0000045.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000046.jpg",
+        "path": "work/studio/images/train/ap_0000046.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000047.jpg",
+        "path": "work/studio/images/train/ap_0000047.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_4",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000048.jpg",
+        "path": "work/studio/images/train/ap_0000048.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000049.jpg",
+        "path": "work/studio/images/train/ap_0000049.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000050.jpg",
+        "path": "work/studio/images/train/ap_0000050.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000051.jpg",
+        "path": "work/studio/images/train/ap_0000051.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000052.jpg",
+        "path": "work/studio/images/train/ap_0000052.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000053.jpg",
+        "path": "work/studio/images/train/ap_0000053.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000054.jpg",
+        "path": "work/studio/images/train/ap_0000054.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000055.jpg",
+        "path": "work/studio/images/train/ap_0000055.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000056.jpg",
+        "path": "work/studio/images/train/ap_0000056.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000057.jpg",
+        "path": "work/studio/images/train/ap_0000057.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000058.jpg",
+        "path": "work/studio/images/train/ap_0000058.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000059.jpg",
+        "path": "work/studio/images/train/ap_0000059.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000060.jpg",
+        "path": "work/studio/images/train/ap_0000060.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000061.jpg",
+        "path": "work/studio/images/train/ap_0000061.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000062.jpg",
+        "path": "work/studio/images/train/ap_0000062.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000063.jpg",
+        "path": "work/studio/images/train/ap_0000063.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000064.jpg",
+        "path": "work/studio/images/train/ap_0000064.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000065.jpg",
+        "path": "work/studio/images/train/ap_0000065.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000066.jpg",
+        "path": "work/studio/images/train/ap_0000066.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000067.jpg",
+        "path": "work/studio/images/train/ap_0000067.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000068.jpg",
+        "path": "work/studio/images/train/ap_0000068.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000069.jpg",
+        "path": "work/studio/images/train/ap_0000069.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000070.jpg",
+        "path": "work/studio/images/train/ap_0000070.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000071.jpg",
+        "path": "work/studio/images/train/ap_0000071.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000072.jpg",
+        "path": "work/studio/images/train/ap_0000072.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000073.jpg",
+        "path": "work/studio/images/train/ap_0000073.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000074.jpg",
+        "path": "work/studio/images/train/ap_0000074.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000075.jpg",
+        "path": "work/studio/images/train/ap_0000075.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000076.jpg",
+        "path": "work/studio/images/train/ap_0000076.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000077.jpg",
+        "path": "work/studio/images/train/ap_0000077.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000078.jpg",
+        "path": "work/studio/images/train/ap_0000078.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000079.jpg",
+        "path": "work/studio/images/train/ap_0000079.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000080.jpg",
+        "path": "work/studio/images/train/ap_0000080.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000081.jpg",
+        "path": "work/studio/images/train/ap_0000081.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000082.jpg",
+        "path": "work/studio/images/train/ap_0000082.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000083.jpg",
+        "path": "work/studio/images/train/ap_0000083.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000084.jpg",
+        "path": "work/studio/images/train/ap_0000084.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000085.jpg",
+        "path": "work/studio/images/train/ap_0000085.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000086.jpg",
+        "path": "work/studio/images/train/ap_0000086.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000087.jpg",
+        "path": "work/studio/images/train/ap_0000087.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000088.jpg",
+        "path": "work/studio/images/train/ap_0000088.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000089.jpg",
+        "path": "work/studio/images/train/ap_0000089.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000090.jpg",
+        "path": "work/studio/images/train/ap_0000090.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000091.jpg",
+        "path": "work/studio/images/train/ap_0000091.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000092.jpg",
+        "path": "work/studio/images/train/ap_0000092.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000093.jpg",
+        "path": "work/studio/images/train/ap_0000093.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000094.jpg",
+        "path": "work/studio/images/train/ap_0000094.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000095.jpg",
+        "path": "work/studio/images/train/ap_0000095.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_5",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000110.jpg",
+        "path": "work/studio/images/train/ap_0000110.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000111.jpg",
+        "path": "work/studio/images/train/ap_0000111.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000112.jpg",
+        "path": "work/studio/images/train/ap_0000112.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000113.jpg",
+        "path": "work/studio/images/train/ap_0000113.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000114.jpg",
+        "path": "work/studio/images/train/ap_0000114.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000115.jpg",
+        "path": "work/studio/images/train/ap_0000115.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000116.jpg",
+        "path": "work/studio/images/train/ap_0000116.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000117.jpg",
+        "path": "work/studio/images/train/ap_0000117.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000118.jpg",
+        "path": "work/studio/images/train/ap_0000118.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000119.jpg",
+        "path": "work/studio/images/train/ap_0000119.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_7",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000120.jpg",
+        "path": "work/studio/images/train/ap_0000120.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000121.jpg",
+        "path": "work/studio/images/train/ap_0000121.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000122.jpg",
+        "path": "work/studio/images/train/ap_0000122.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000123.jpg",
+        "path": "work/studio/images/train/ap_0000123.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000124.jpg",
+        "path": "work/studio/images/train/ap_0000124.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000125.jpg",
+        "path": "work/studio/images/train/ap_0000125.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000126.jpg",
+        "path": "work/studio/images/train/ap_0000126.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000127.jpg",
+        "path": "work/studio/images/train/ap_0000127.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000128.jpg",
+        "path": "work/studio/images/train/ap_0000128.jpg",
+        "width": 1080,
+        "height": 1920,
+        "source_id": "S_8",
+        "source_type": "video"
+      }
+    ],
+    "val": [
+      {
+        "name": "ap_0000096.jpg",
+        "path": "work/studio/images/val/ap_0000096.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000097.jpg",
+        "path": "work/studio/images/val/ap_0000097.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000098.jpg",
+        "path": "work/studio/images/val/ap_0000098.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000099.jpg",
+        "path": "work/studio/images/val/ap_0000099.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000100.jpg",
+        "path": "work/studio/images/val/ap_0000100.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000101.jpg",
+        "path": "work/studio/images/val/ap_0000101.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000102.jpg",
+        "path": "work/studio/images/val/ap_0000102.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000103.jpg",
+        "path": "work/studio/images/val/ap_0000103.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000104.jpg",
+        "path": "work/studio/images/val/ap_0000104.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000105.jpg",
+        "path": "work/studio/images/val/ap_0000105.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000106.jpg",
+        "path": "work/studio/images/val/ap_0000106.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000107.jpg",
+        "path": "work/studio/images/val/ap_0000107.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000108.jpg",
+        "path": "work/studio/images/val/ap_0000108.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000109.jpg",
+        "path": "work/studio/images/val/ap_0000109.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_6",
+        "source_type": "video"
+      }
+    ],
+    "test": [
+      {
+        "name": "ap_0000021.jpg",
+        "path": "work/studio/images/test/ap_0000021.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000022.jpg",
+        "path": "work/studio/images/test/ap_0000022.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000023.jpg",
+        "path": "work/studio/images/test/ap_0000023.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000024.jpg",
+        "path": "work/studio/images/test/ap_0000024.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000025.jpg",
+        "path": "work/studio/images/test/ap_0000025.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000026.jpg",
+        "path": "work/studio/images/test/ap_0000026.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000027.jpg",
+        "path": "work/studio/images/test/ap_0000027.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000028.jpg",
+        "path": "work/studio/images/test/ap_0000028.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000029.jpg",
+        "path": "work/studio/images/test/ap_0000029.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000030.jpg",
+        "path": "work/studio/images/test/ap_0000030.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000031.jpg",
+        "path": "work/studio/images/test/ap_0000031.jpg",
+        "width": 1280,
+        "height": 720,
+        "source_id": "S_2",
+        "source_type": "video"
+      },
+      {
+        "name": "ap_0000032.jpg",
+        "path": "work/studio/images/test/ap_0000032.jpg",
+        "width": 720,
+        "height": 1280,
+        "source_id": "S_3",
+        "source_type": "video"
+      }
+    ]
+  }
+}
