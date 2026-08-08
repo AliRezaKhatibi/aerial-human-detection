@@ -1,0 +1,7 @@
+ultralytics>=8.4.114
+transformers>=4.53.0
+albumentations
+pycocotools
+pillow
+numpy
+matplotlib

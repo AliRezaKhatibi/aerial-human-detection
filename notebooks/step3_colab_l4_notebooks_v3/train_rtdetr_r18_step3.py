@@ -1,0 +1,2002 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+STEP 3 - Aerial Person Detection Training
+Shared standalone utilities embedded in this script.
+
+Project invariants enforced here:
+1) Target class is person only.
+2) Training/validation use the Step-2 Development Pool only.
+3) The frozen private Final Test is NEVER read for training, tuning, early stopping,
+   augmentation design, threshold selection, or routine validation.
+4) Dataset/split provenance, software/hardware environment, hyperparameters,
+   checkpoints, metrics, timing, peak VRAM, hashes, and failure cases are archived.
+5) Fixed-budget baseline defaults follow the project protocol:
+   45 epochs, 1280 input, seed 42, AMP when CUDA is available.
+   These are project controls for fair comparison, not claimed universal optima.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import csv
+import dataclasses
+import hashlib
+import importlib
+import importlib.metadata
+import json
+import math
+import os
+import platform
+import random
+import shutil
+import socket
+import statistics
+import subprocess
+import sys
+import time
+import traceback
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+FORBIDDEN_TEST_TOKENS = (
+    "90_final_test",
+    "final-test",
+    "final_test",
+    "private_test",
+    "private-test",
+)
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+SIZE_BUCKETS = {
+    "tiny": (0.0, 16.0),
+    "small": (16.0, 32.0),
+    "medium": (32.0, 64.0),
+    "large": (64.0, float("inf")),
+}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def timestamp_id() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_json(path: Path, data: Any) -> None:
+    ensure_dir(path.parent)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+
+def read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def safe_copy(src: Path, dst: Path) -> Optional[Path]:
+    if not src or not src.exists():
+        return None
+    ensure_dir(dst.parent)
+    shutil.copy2(src, dst)
+    return dst
+
+
+def import_version(package_name: str) -> Optional[str]:
+    try:
+        return importlib.metadata.version(package_name)
+    except Exception:
+        return None
+
+
+def git_info(path: Path) -> Dict[str, Any]:
+    out = {"root": str(path), "commit": None, "dirty": None, "branch": None}
+    try:
+        root = subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        out["root"] = root
+        out["commit"] = subprocess.check_output(
+            ["git", "-C", root, "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        out["branch"] = subprocess.check_output(
+            ["git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        dirty = subprocess.check_output(
+            ["git", "-C", root, "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
+        )
+        out["dirty"] = bool(dirty.strip())
+    except Exception:
+        pass
+    return out
+
+
+def run_command(command: Sequence[str], cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess:
+    print("$", " ".join(map(str, command)), flush=True)
+    return subprocess.run(list(map(str, command)), cwd=str(cwd) if cwd else None, check=check)
+
+
+def running_in_colab() -> bool:
+    return "COLAB_RELEASE_TAG" in os.environ or "google.colab" in sys.modules or Path("/content").exists() and Path("/content/drive").parent.exists()
+
+
+def mount_google_drive_if_requested(enabled: bool) -> None:
+    """Mount Google Drive automatically in Colab. Outside Colab this is a no-op."""
+    if not enabled or not running_in_colab():
+        return
+    try:
+        from google.colab import drive  # type: ignore
+        mount_point = Path("/content/drive")
+        if not (mount_point / "MyDrive").exists():
+            drive.mount(str(mount_point), force_remount=False)
+    except Exception as exc:
+        raise RuntimeError(
+            "Google Drive could not be mounted. In Colab, authorize Drive access and run the script again."
+        ) from exc
+
+
+def default_drive_output_root(project_root: Path) -> Path:
+    """Return a persistent Google Drive output root in Colab, otherwise use the project-local runs directory."""
+    drive_root = Path("/content/drive/MyDrive")
+    if drive_root.exists():
+        try:
+            project_root.resolve().relative_to(drive_root.resolve())
+            return project_root / "runs" / "step3"
+        except Exception:
+            return drive_root / "aerial_person_project" / "step3" / "runs"
+    return project_root / "runs" / "step3"
+
+
+def verify_l4_environment(device: str) -> Dict[str, Any]:
+    """Record the active GPU and warn when the runtime is not the requested NVIDIA L4."""
+    info: Dict[str, Any] = {"requested_training_gpu": "NVIDIA L4", "detected_gpu": None, "is_l4": False}
+    try:
+        import torch
+        if device != "cpu" and torch.cuda.is_available():
+            idx = int(str(device).split(":")[-1]) if ":" in str(device) else int(str(device))
+            name = torch.cuda.get_device_name(idx)
+            info["detected_gpu"] = name
+            info["is_l4"] = "L4" in name.upper()
+            print(f"Detected CUDA GPU: {name}")
+            if not info["is_l4"]:
+                print("WARNING: The Step-3 training protocol was requested for an NVIDIA L4, but a different GPU is active.")
+        else:
+            print("WARNING: CUDA is not available. Colab GPU acceleration must be enabled before final Step-3 training.")
+    except Exception as exc:
+        info["inspection_error"] = repr(exc)
+    return info
+
+
+def guard_not_final_test(*paths: Optional[Path]) -> None:
+    for path in paths:
+        if path is None:
+            continue
+        low = str(path).replace("\\", "/").lower()
+        if any(token in low for token in FORBIDDEN_TEST_TOKENS):
+            raise RuntimeError(
+                f"Refusing to use a Final-Test-like path in Step 3: {path}\n"
+                "The frozen private Final Test is reserved for Step 6 and must never be used here."
+            )
+
+
+def discover_project_root(start: Optional[Path] = None) -> Path:
+    start = (start or Path.cwd()).resolve()
+
+    # Colab-first locations. These checks are intentionally shallow so that the
+    # script does not recursively scan the user's entire Google Drive.
+    colab_candidates = [
+        Path("/content/drive/MyDrive/aerial_person_project"),
+        Path("/content/drive/MyDrive/aerial_person_final_product"),
+        Path("/content/drive/MyDrive/aerial-person-project"),
+        Path("/content/drive/MyDrive/aerial-person-step2-pipeline"),
+        Path("/content/drive/MyDrive/step2"),
+    ]
+    mydrive = Path("/content/drive/MyDrive")
+    if mydrive.exists():
+        try:
+            colab_candidates.extend([p for p in mydrive.iterdir() if p.is_dir()])
+        except Exception:
+            pass
+    for p in colab_candidates:
+        if p.exists() and (
+            (p / "workspace" / "aerial-person-data" / "03_development").exists()
+            or (p / "aerial-person-data" / "03_development").exists()
+            or (p / "03_development").exists()
+            or (p / "workspace").exists()
+            or (p / ".git").exists()
+        ):
+            return p.resolve()
+
+    candidates = [start] + list(start.parents)
+    markers = ("aerial-person-step2-pipeline", "workspace", ".git")
+    for p in candidates:
+        if any((p / m).exists() for m in markers):
+            return p
+    return start
+
+
+def discover_development_root(project_root: Path, explicit: Optional[str]) -> Path:
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        guard_not_final_test(p)
+        if not p.exists():
+            raise FileNotFoundError(f"Development root not found: {p}")
+        return p
+
+    candidates = [
+        project_root / "workspace" / "aerial-person-data" / "03_development",
+        project_root / "aerial-person-data" / "03_development",
+        project_root / "03_development",
+        Path("/content/drive/MyDrive/aerial_person_project/workspace/aerial-person-data/03_development"),
+        Path("/content/drive/MyDrive/aerial_person_project/aerial-person-data/03_development"),
+        Path("/content/drive/MyDrive/aerial_person_project/03_development"),
+    ]
+    for c in candidates:
+        if c.exists():
+            guard_not_final_test(c)
+            return c.resolve()
+
+    # Controlled fallback: search only for directory name.
+    hits = [p for p in project_root.rglob("03_development") if p.is_dir()]
+    hits = [p for p in hits if not any(t in str(p).lower() for t in FORBIDDEN_TEST_TOKENS)]
+    if hits:
+        return hits[0].resolve()
+    raise FileNotFoundError(
+        "Could not locate the Step-2 Development Pool. Pass --development-root explicitly."
+    )
+
+
+def discover_final_test_freeze(project_root: Path) -> Optional[Path]:
+    candidates = [
+        project_root / "workspace" / "aerial-person-data" / "90_final_test_v1" / "FREEZE.json",
+        project_root / "aerial-person-data" / "90_final_test_v1" / "FREEZE.json",
+        project_root / "90_final_test_v1" / "FREEZE.json",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    hits = list(project_root.rglob("FREEZE.json"))
+    for h in hits:
+        if "final" in str(h).lower() and "test" in str(h).lower():
+            return h.resolve()
+    return None
+
+
+def require_frozen_final_test(project_root: Path, allow_missing: bool = True) -> Optional[Path]:
+    """Discover Final-Test freeze metadata if present, but never require it for Step 3.
+
+    The private >=1000-image dataset is reserved strictly for final testing. Step-3
+    training must run normally even when that dataset has not been collected or
+    frozen yet. Only FREEZE.json metadata is inspected when it exists; no Final-Test
+    image or annotation is opened here.
+    """
+    freeze = discover_final_test_freeze(project_root)
+    if freeze is None:
+        print(
+            "INFO: Private Final Test was not found. This is allowed in Step 3; "
+            "training will continue using only the Step-2 Development Pool."
+        )
+        return None
+    print(f"Private Final-Test freeze metadata found: {freeze}")
+    print("Final-Test images/annotations will NOT be accessed during Step 3.")
+    return freeze
+
+
+def find_file(root: Path, names: Sequence[str]) -> Optional[Path]:
+    for name in names:
+        direct = root / name
+        if direct.exists():
+            return direct.resolve()
+    for name in names:
+        hits = list(root.rglob(name))
+        if hits:
+            return hits[0].resolve()
+    return None
+
+
+def discover_manifest(development_root: Path, explicit: Optional[str]) -> Optional[Path]:
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        guard_not_final_test(p)
+        if not p.exists():
+            raise FileNotFoundError(p)
+        return p
+    return find_file(
+        development_root.parent,
+        ["dataset_manifest.csv", "development_manifest.csv", "manifest.csv"],
+    )
+
+
+def discover_data_yaml(development_root: Path, explicit: Optional[str]) -> Path:
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        guard_not_final_test(p)
+        if not p.exists():
+            raise FileNotFoundError(p)
+        return p
+    hit = find_file(development_root.parent, ["data.yaml", "dataset.yaml"])
+    if not hit:
+        raise FileNotFoundError("YOLO data.yaml not found. Pass --data-yaml explicitly.")
+    guard_not_final_test(hit)
+    return hit
+
+
+def discover_coco_json(development_root: Path, split: str, explicit: Optional[str]) -> Path:
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        guard_not_final_test(p)
+        if not p.exists():
+            raise FileNotFoundError(p)
+        return p
+    names = (
+        ["instances_train.json", "train.json", "instances_train2017.json"]
+        if split == "train"
+        else ["instances_val.json", "val.json", "instances_val2017.json"]
+    )
+    hit = find_file(development_root.parent, names)
+    if not hit:
+        raise FileNotFoundError(f"COCO {split} JSON not found. Pass --coco-{split} explicitly.")
+    guard_not_final_test(hit)
+    return hit
+
+
+def load_manifest_rows(path: Optional[Path]) -> List[Dict[str, str]]:
+    if not path or not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        return [dict(r) for r in csv.DictReader(f)]
+
+
+def first_existing_key(row: Mapping[str, Any], keys: Sequence[str]) -> Optional[str]:
+    lower = {str(k).lower(): k for k in row.keys()}
+    for key in keys:
+        if key.lower() in lower:
+            return str(lower[key.lower()])
+    return None
+
+
+def normalize_split(value: str) -> str:
+    v = (value or "").strip().lower().replace("_", "-")
+    aliases = {
+        "training": "train",
+        "tr": "train",
+        "validation": "val",
+        "valid": "val",
+        "dev": "val",
+        "internal-val": "val",
+        "internal-validation": "val",
+    }
+    return aliases.get(v, v)
+
+
+def audit_manifest(rows: List[Dict[str, str]]) -> Dict[str, Any]:
+    if not rows:
+        return {
+            "available": False,
+            "row_count": 0,
+            "warnings": ["Manifest not available; dataset provenance checks are limited."],
+        }
+
+    sample = rows[0]
+    split_key = first_existing_key(sample, ["split", "dataset_split"])
+    group_key = first_existing_key(sample, ["group_id", "sequence_id", "flight_id", "site_id", "actor_id", "source_group"])
+    source_key = first_existing_key(sample, ["source", "source_name", "dataset", "dataset_name"])
+    person_key = first_existing_key(sample, ["person_count", "count_person", "num_persons", "num_objects"])
+    class_key = first_existing_key(sample, ["class_name", "class", "target_class"])
+
+    split_counts = Counter()
+    source_counts = Counter()
+    background_count = 0
+    groups_by_split: Dict[str, set] = defaultdict(set)
+    unexpected_classes = set()
+
+    for r in rows:
+        split = normalize_split(r.get(split_key, "")) if split_key else ""
+        if split:
+            split_counts[split] += 1
+        if source_key:
+            source_counts[r.get(source_key, "")] += 1
+        if person_key:
+            try:
+                if float(r.get(person_key, "0") or 0) <= 0:
+                    background_count += 1
+            except Exception:
+                pass
+        if group_key and split:
+            g = (r.get(group_key, "") or "").strip()
+            if g:
+                groups_by_split[split].add(g)
+        if class_key:
+            c = (r.get(class_key, "") or "").strip().lower()
+            if c and c not in {"person", "0", "person-only", "human"}:
+                unexpected_classes.add(c)
+
+    leakage = []
+    train_groups = groups_by_split.get("train", set())
+    val_groups = groups_by_split.get("val", set())
+    for g in sorted(train_groups.intersection(val_groups)):
+        leakage.append(g)
+
+    warnings = []
+    if not split_key:
+        warnings.append("No split column detected in manifest.")
+    if not group_key:
+        warnings.append("No group/sequence/site/flight/actor key detected; group leakage cannot be verified.")
+    if leakage:
+        warnings.append(f"CRITICAL: {len(leakage)} group IDs occur in both train and val.")
+    if unexpected_classes:
+        warnings.append(f"Unexpected class values observed: {sorted(unexpected_classes)[:20]}")
+
+    return {
+        "available": True,
+        "row_count": len(rows),
+        "columns": list(sample.keys()),
+        "split_key": split_key,
+        "group_key": group_key,
+        "source_key": source_key,
+        "person_count_key": person_key,
+        "class_key": class_key,
+        "split_counts": dict(split_counts),
+        "source_counts": dict(source_counts),
+        "background_images": background_count if person_key else None,
+        "group_leakage_train_val": leakage[:100],
+        "group_leakage_count": len(leakage),
+        "unexpected_classes": sorted(unexpected_classes),
+        "warnings": warnings,
+    }
+
+
+def assert_manifest_safe(audit: Mapping[str, Any], allow_missing_group_key: bool = False) -> None:
+    if audit.get("group_leakage_count", 0):
+        raise RuntimeError(
+            f"Manifest preflight failed: {audit['group_leakage_count']} group IDs overlap train/val."
+        )
+    if audit.get("available") and not audit.get("group_key") and not allow_missing_group_key:
+        raise RuntimeError(
+            "Manifest does not expose a group-aware key (sequence/site/flight/actor/source_group). "
+            "Pass --allow-missing-group-key only if the Step-2 split was independently verified."
+        )
+    if audit.get("unexpected_classes"):
+        raise RuntimeError(
+            f"Manifest contains unexpected target classes: {audit['unexpected_classes'][:10]}"
+        )
+
+
+def capture_environment() -> Dict[str, Any]:
+    env: Dict[str, Any] = {
+        "captured_utc": utc_now(),
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "python": sys.version,
+        "executable": sys.executable,
+        "cpu": platform.processor(),
+        "packages": {
+            name: import_version(name)
+            for name in [
+                "torch",
+                "torchvision",
+                "ultralytics",
+                "transformers",
+                "albumentations",
+                "pycocotools",
+                "numpy",
+                "pillow",
+                "opencv-python",
+                "matplotlib",
+                "pandas",
+            ]
+        },
+    }
+    try:
+        import torch
+        env["torch"] = {
+            "version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_version": torch.version.cuda,
+            "cudnn_version": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,
+        }
+        if torch.cuda.is_available():
+            env["gpus"] = []
+            for i in range(torch.cuda.device_count()):
+                p = torch.cuda.get_device_properties(i)
+                env["gpus"].append(
+                    {
+                        "index": i,
+                        "name": p.name,
+                        "total_memory_bytes": p.total_memory,
+                        "compute_capability": f"{p.major}.{p.minor}",
+                    }
+                )
+    except Exception as exc:
+        env["torch_error"] = repr(exc)
+
+    try:
+        smi = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        env["nvidia_smi"] = [line.strip() for line in smi.splitlines() if line.strip()]
+    except Exception:
+        env["nvidia_smi"] = None
+    return env
+
+
+def set_global_seed(seed: int, deterministic: bool = True) -> None:
+    random.seed(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        if deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+
+
+def reset_peak_vram() -> None:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+def peak_vram_mb() -> Optional[float]:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            return float(torch.cuda.max_memory_allocated() / (1024 ** 2))
+    except Exception:
+        pass
+    return None
+
+
+def cuda_sync() -> None:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:
+        pass
+
+
+def count_parameters(model: Any) -> Dict[str, Optional[int]]:
+    try:
+        total = sum(int(p.numel()) for p in model.parameters())
+        trainable = sum(int(p.numel()) for p in model.parameters() if p.requires_grad)
+        return {"total": total, "trainable": trainable}
+    except Exception:
+        return {"total": None, "trainable": None}
+
+
+def load_coco_json(path: Path) -> Dict[str, Any]:
+    data = read_json(path)
+    if not isinstance(data, dict) or "images" not in data or "annotations" not in data:
+        raise ValueError(f"Not a COCO detection JSON: {path}")
+    return data
+
+
+def person_category_id(coco_data: Mapping[str, Any]) -> int:
+    cats = list(coco_data.get("categories", []))
+    for c in cats:
+        if str(c.get("name", "")).lower() in {"person", "human", "pedestrian", "people"}:
+            return int(c["id"])
+    if len(cats) == 1:
+        return int(cats[0]["id"])
+    raise RuntimeError("Could not identify a unique person category in COCO JSON.")
+
+
+def validate_person_only_coco(coco_data: Mapping[str, Any]) -> Dict[str, Any]:
+    pid = person_category_id(coco_data)
+    ann_cat_ids = {int(a.get("category_id", -999)) for a in coco_data.get("annotations", [])}
+    unexpected = sorted(x for x in ann_cat_ids if x != pid)
+    if unexpected:
+        raise RuntimeError(f"COCO file is not person-only. Unexpected category IDs: {unexpected[:20]}")
+    return {
+        "person_category_id": pid,
+        "images": len(coco_data.get("images", [])),
+        "annotations": len(coco_data.get("annotations", [])),
+        "categories": coco_data.get("categories", []),
+    }
+
+
+def build_image_index(search_root: Path) -> Dict[str, List[Path]]:
+    index: Dict[str, List[Path]] = defaultdict(list)
+    for p in search_root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS:
+            index[p.name].append(p.resolve())
+    return index
+
+
+def resolve_coco_image_paths(
+    coco_data: Mapping[str, Any],
+    search_root: Path,
+    strict: bool = True,
+) -> Dict[int, Path]:
+    index = build_image_index(search_root)
+    resolved: Dict[int, Path] = {}
+    missing = []
+    ambiguous = []
+    for im in coco_data["images"]:
+        image_id = int(im["id"])
+        file_name = str(im["file_name"]).replace("\\", "/")
+        direct_candidates = [
+            search_root / file_name,
+            search_root / "images" / file_name,
+            search_root / "images" / "train" / Path(file_name).name,
+            search_root / "images" / "val" / Path(file_name).name,
+            search_root / "train" / "images" / Path(file_name).name,
+            search_root / "val" / "images" / Path(file_name).name,
+        ]
+        found = next((p.resolve() for p in direct_candidates if p.exists()), None)
+        if found is None:
+            matches = index.get(Path(file_name).name, [])
+            if len(matches) == 1:
+                found = matches[0]
+            elif len(matches) > 1:
+                # Prefer candidate whose suffix components match COCO file_name.
+                fn_parts = Path(file_name).parts
+                scored = []
+                for m in matches:
+                    mp = m.parts
+                    suffix_match = 0
+                    for a, b in zip(reversed(mp), reversed(fn_parts)):
+                        if a == b:
+                            suffix_match += 1
+                        else:
+                            break
+                    scored.append((suffix_match, m))
+                scored.sort(key=lambda x: x[0], reverse=True)
+                if scored and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+                    found = scored[0][1]
+                else:
+                    ambiguous.append(file_name)
+        if found:
+            guard_not_final_test(found)
+            resolved[image_id] = found
+        else:
+            missing.append(file_name)
+    if strict and (missing or ambiguous):
+        raise FileNotFoundError(
+            f"Could not resolve all COCO images. missing={len(missing)}, ambiguous={len(ambiguous)}. "
+            f"Examples missing={missing[:5]}, ambiguous={ambiguous[:5]}"
+        )
+    return resolved
+
+
+def xyxy_to_xywh(box: Sequence[float]) -> List[float]:
+    x1, y1, x2, y2 = map(float, box)
+    return [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)]
+
+
+def box_iou_xywh(a: Sequence[float], b: Sequence[float]) -> float:
+    ax, ay, aw, ah = map(float, a)
+    bx, by, bw, bh = map(float, b)
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+    ix1, iy1 = max(ax, bx), max(ay, by)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    union = max(aw * ah + bw * bh - inter, 1e-12)
+    return inter / union
+
+
+def size_bucket_from_bbox(bbox_xywh: Sequence[float]) -> str:
+    _, _, w, h = map(float, bbox_xywh)
+    # Equivalent square side sqrt(area), so the per-object classification is
+    # consistent with COCOeval area ranges [0,16^2), [16^2,32^2), ...
+    characteristic = math.sqrt(max(w * h, 0.0))
+    for name, (lo, hi) in SIZE_BUCKETS.items():
+        if lo <= characteristic < hi:
+            return name
+    return "large"
+
+
+def threshold_operating_metrics(
+    coco_data: Mapping[str, Any],
+    predictions: Sequence[Mapping[str, Any]],
+    score_threshold: float = 0.25,
+    iou_threshold: float = 0.50,
+) -> Dict[str, Any]:
+    pid = person_category_id(coco_data)
+    gt_by_image: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for ann in coco_data["annotations"]:
+        if int(ann["category_id"]) == pid and not int(ann.get("iscrowd", 0)):
+            gt_by_image[int(ann["image_id"])].append(dict(ann))
+    pred_by_image: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for p in predictions:
+        if int(p["category_id"]) == pid and float(p["score"]) >= score_threshold:
+            pred_by_image[int(p["image_id"])].append(dict(p))
+
+    tp = fp = fn = 0
+    bucket_gt = Counter()
+    bucket_tp = Counter()
+    per_image = []
+    for im in coco_data["images"]:
+        iid = int(im["id"])
+        gts = gt_by_image.get(iid, [])
+        preds = sorted(pred_by_image.get(iid, []), key=lambda x: float(x["score"]), reverse=True)
+        matched = set()
+        local_tp = 0
+        for p in preds:
+            best_iou = -1.0
+            best_j = None
+            for j, g in enumerate(gts):
+                if j in matched:
+                    continue
+                iou = box_iou_xywh(p["bbox"], g["bbox"])
+                if iou > best_iou:
+                    best_iou, best_j = iou, j
+            if best_j is not None and best_iou >= iou_threshold:
+                matched.add(best_j)
+                tp += 1
+                local_tp += 1
+                bucket_tp[size_bucket_from_bbox(gts[best_j]["bbox"])] += 1
+            else:
+                fp += 1
+        local_fn = len(gts) - len(matched)
+        fn += local_fn
+        for g in gts:
+            bucket_gt[size_bucket_from_bbox(g["bbox"])] += 1
+        per_image.append(
+            {
+                "image_id": iid,
+                "file_name": im.get("file_name"),
+                "gt": len(gts),
+                "pred": len(preds),
+                "tp": local_tp,
+                "fp": len(preds) - local_tp,
+                "fn": local_fn,
+                "error_score": local_fn * 3 + (len(preds) - local_tp),
+            }
+        )
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+    size_recall = {
+        k: {
+            "gt": int(bucket_gt[k]),
+            "tp": int(bucket_tp[k]),
+            "recall": float(bucket_tp[k] / max(bucket_gt[k], 1)),
+        }
+        for k in SIZE_BUCKETS
+    }
+    per_image.sort(key=lambda r: (r["error_score"], r["fn"], r["fp"]), reverse=True)
+    return {
+        "score_threshold": score_threshold,
+        "iou_threshold": iou_threshold,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "size_recall": size_recall,
+        "worst_images": per_image[:200],
+    }
+
+
+def coco_eval_metrics(
+    coco_json: Path,
+    predictions_json: Path,
+    max_dets: int = 1000,
+) -> Dict[str, Any]:
+    try:
+        import numpy as np
+        from pycocotools.coco import COCO
+        from pycocotools.cocoeval import COCOeval
+    except Exception as exc:
+        return {"available": False, "error": f"pycocotools unavailable: {exc!r}"}
+
+    coco_gt = COCO(str(coco_json))
+    raw_preds = read_json(predictions_json)
+    if not raw_preds:
+        return {
+            "available": True,
+            "ap50_95": 0.0,
+            "ap50": 0.0,
+            "ar50_95": 0.0,
+            "size_ap50_95": {k: 0.0 for k in SIZE_BUCKETS},
+            "size_ap50": {k: 0.0 for k in SIZE_BUCKETS},
+        }
+    coco_dt = coco_gt.loadRes(raw_preds)
+    pid = person_category_id(load_coco_json(coco_json))
+
+    def run_area(lo_px: float, hi_px: float) -> Dict[str, float]:
+        lo_area = 0.0 if lo_px <= 0 else lo_px * lo_px
+        hi_area = 1e12 if math.isinf(hi_px) else hi_px * hi_px
+        ev = COCOeval(coco_gt, coco_dt, "bbox")
+        ev.params.catIds = [pid]
+        ev.params.maxDets = [1, 100, max_dets]
+        ev.params.areaRng = [[lo_area, hi_area]]
+        ev.params.areaRngLbl = ["custom"]
+        ev.evaluate()
+        ev.accumulate()
+        precision = ev.eval.get("precision")
+        recall = ev.eval.get("recall")
+        if precision is None or recall is None:
+            return {"ap50_95": float("nan"), "ap50": float("nan"), "ar50_95": float("nan")}
+        p_all = precision[:, :, 0, 0, 2]
+        valid_all = p_all[p_all > -1]
+        ap = float(valid_all.mean()) if valid_all.size else float("nan")
+        p50 = precision[0, :, 0, 0, 2]
+        valid50 = p50[p50 > -1]
+        ap50 = float(valid50.mean()) if valid50.size else float("nan")
+        r_all = recall[:, 0, 0, 2]
+        valid_r = r_all[r_all > -1]
+        ar = float(valid_r.mean()) if valid_r.size else float("nan")
+        return {"ap50_95": ap, "ap50": ap50, "ar50_95": ar}
+
+    overall = run_area(0.0, float("inf"))
+    size = {name: run_area(lo, hi) for name, (lo, hi) in SIZE_BUCKETS.items()}
+    return {
+        "available": True,
+        "ap50_95": overall["ap50_95"],
+        "ap50": overall["ap50"],
+        "ar50_95": overall["ar50_95"],
+        "size_ap50_95": {k: v["ap50_95"] for k, v in size.items()},
+        "size_ap50": {k: v["ap50"] for k, v in size.items()},
+        "size_ar50_95": {k: v["ar50_95"] for k, v in size.items()},
+        "max_dets": max_dets,
+        "size_definition": "equivalent square side sqrt(box area): tiny<16, small[16,32), medium[32,64), large>=64 px",
+    }
+
+
+def save_operating_metrics_csv(path: Path, operating: Mapping[str, Any]) -> None:
+    rows = operating.get("worst_images", [])
+    if not rows:
+        return
+    ensure_dir(path.parent)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def save_failure_visuals(
+    coco_data: Mapping[str, Any],
+    predictions: Sequence[Mapping[str, Any]],
+    image_paths: Mapping[int, Path],
+    operating: Mapping[str, Any],
+    out_dir: Path,
+    limit: int = 24,
+    score_threshold: float = 0.25,
+) -> None:
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        return
+    ensure_dir(out_dir)
+    pid = person_category_id(coco_data)
+    gt_by_image: Dict[int, List[Mapping[str, Any]]] = defaultdict(list)
+    pred_by_image: Dict[int, List[Mapping[str, Any]]] = defaultdict(list)
+    for a in coco_data["annotations"]:
+        if int(a["category_id"]) == pid:
+            gt_by_image[int(a["image_id"])].append(a)
+    for p in predictions:
+        if int(p["category_id"]) == pid and float(p["score"]) >= score_threshold:
+            pred_by_image[int(p["image_id"])].append(p)
+
+    for rank, item in enumerate(operating.get("worst_images", [])[:limit], start=1):
+        iid = int(item["image_id"])
+        path = image_paths.get(iid)
+        if not path or not path.exists():
+            continue
+        try:
+            im = Image.open(path).convert("RGB")
+            draw = ImageDraw.Draw(im)
+            # Ground truth: solid rectangles; predictions: dashed-like double rectangles.
+            for g in gt_by_image.get(iid, []):
+                x, y, w, h = map(float, g["bbox"])
+                draw.rectangle([x, y, x + w, y + h], width=3)
+            for p in pred_by_image.get(iid, []):
+                x, y, w, h = map(float, p["bbox"])
+                draw.rectangle([x + 1, y + 1, x + w - 1, y + h - 1], width=1)
+            dst = out_dir / f"{rank:03d}_id{iid}_{path.name}"
+            im.save(dst, quality=92)
+        except Exception:
+            continue
+
+
+def write_markdown_report(path: Path, report: Mapping[str, Any]) -> None:
+    model = report.get("model", {})
+    protocol = report.get("protocol", {})
+    metrics = report.get("metrics", {})
+    runtime = report.get("runtime", {})
+    dataset = report.get("dataset", {})
+    lines = [
+        "# Step 3 Training Run Report",
+        "",
+        f"- Run ID: `{report.get('run_id')}`",
+        f"- Model: `{model.get('name')}`",
+        f"- Architecture role: {model.get('role')}",
+        f"- Started UTC: `{report.get('started_utc')}`",
+        f"- Finished UTC: `{report.get('finished_utc')}`",
+        f"- Protocol: `{protocol.get('name')}`",
+        f"- Epoch budget: `{protocol.get('epochs')}`",
+        f"- Image size: `{protocol.get('imgsz')}`",
+        f"- Batch size: `{protocol.get('batch')}`",
+        f"- Seed: `{protocol.get('seed')}`",
+        "",
+        "## Dataset",
+        f"- Development root: `{dataset.get('development_root')}`",
+        f"- Manifest: `{dataset.get('manifest')}`",
+        f"- Final-test freeze present: `{dataset.get('final_test_freeze_present')}`",
+        "- Final Test accessed by this run: **NO**",
+        "",
+        "## Primary internal-validation metrics",
+        f"- Precision@operating-point: `{metrics.get('precision')}`",
+        f"- Recall@operating-point: `{metrics.get('recall')}`",
+        f"- F1@operating-point: `{metrics.get('f1')}`",
+        f"- AP50: `{metrics.get('ap50')}`",
+        f"- mAP50-95: `{metrics.get('map50_95')}`",
+        "",
+        "## Size-aware validation",
+    ]
+    for k, v in (metrics.get("size_metrics") or {}).items():
+        lines.append(f"- {k}: `{v}`")
+    lines += [
+        "",
+        "## Runtime",
+        f"- Training seconds: `{runtime.get('training_seconds')}`",
+        f"- Peak allocated VRAM MB: `{runtime.get('peak_vram_mb')}`",
+        f"- Cold latency ms/image: `{runtime.get('cold_latency_ms')}`",
+        f"- Warm latency median ms/image: `{runtime.get('warm_latency_median_ms')}`",
+        f"- Warm latency mean ms/image: `{runtime.get('warm_latency_mean_ms')}`",
+        "",
+        "## Reproducibility",
+        f"- Best checkpoint SHA256: `{report.get('artifacts', {}).get('best_checkpoint_sha256')}`",
+        f"- Last checkpoint SHA256: `{report.get('artifacts', {}).get('last_checkpoint_sha256')}`",
+        "",
+        "## Notes",
+        "- This report uses only the Step-2 Development Pool and internal validation.",
+        "- The frozen >=1000-image private Final Test remains sealed for Step 6.",
+        "- Do not compare runs with different image sizes or materially different data/splits as if they were controlled baselines.",
+    ]
+    ensure_dir(path.parent)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def benchmark_latencies(callable_infer, warmup: int = 10, iterations: int = 50) -> Dict[str, Optional[float]]:
+    times = []
+    cuda_sync()
+    t0 = time.perf_counter()
+    callable_infer()
+    cuda_sync()
+    cold = (time.perf_counter() - t0) * 1000.0
+
+    for _ in range(max(0, warmup)):
+        callable_infer()
+    cuda_sync()
+
+    for _ in range(max(1, iterations)):
+        t0 = time.perf_counter()
+        callable_infer()
+        cuda_sync()
+        times.append((time.perf_counter() - t0) * 1000.0)
+    return {
+        "cold_latency_ms": cold,
+        "warm_latency_mean_ms": statistics.mean(times) if times else None,
+        "warm_latency_median_ms": statistics.median(times) if times else None,
+        "warm_latency_p95_ms": sorted(times)[max(0, int(math.ceil(0.95 * len(times))) - 1)] if times else None,
+        "latency_iterations": iterations,
+        "latency_warmup": warmup,
+    }
+
+
+def checkpoint_record(path: Optional[Path]) -> Dict[str, Any]:
+    if not path:
+        return {"path": None, "sha256": None, "bytes": None}
+    p = Path(path)
+    if not p.exists():
+        return {"path": str(p), "sha256": None, "bytes": None}
+    return {"path": str(p.resolve()), "sha256": sha256_file(p), "bytes": p.stat().st_size}
+
+
+def create_run_tree(output_root: Path, model_slug: str, run_name: Optional[str]) -> Tuple[str, Path, Dict[str, Path]]:
+    # A stable default run name is intentional: rerunning the same Colab script can
+    # discover the previous last.pt checkpoint in Google Drive and resume safely.
+    run_id = run_name or "fixed_budget_baseline"
+    root = output_root / model_slug / run_id
+    sub = {
+        "root": root,
+        "audit": root / "00_audit",
+        "config": root / "01_config",
+        "checkpoints": root / "02_checkpoints",
+        "metrics": root / "03_metrics",
+        "curves": root / "04_curves",
+        "predictions": root / "05_predictions",
+        "failures": root / "06_failure_samples",
+        "logs": root / "07_logs",
+    }
+    for p in sub.values():
+        ensure_dir(p)
+    ensure_dir(sub["checkpoints"] / "epochs")
+    return run_id, root, sub
+
+
+def append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
+    ensure_dir(path.parent)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(dict(record), ensure_ascii=False, default=str) + "\n")
+
+
+def resolve_resume_checkpoint(run_root: Path, resume: Optional[str], ultralytics_layout: bool = False) -> Optional[Path]:
+    """Resolve an explicit or automatic checkpoint without ever touching Final-Test paths."""
+    value = (resume or "none").strip()
+    if value.lower() in {"none", "false", "0", "off", "fresh"}:
+        return None
+    if value.lower() != "auto":
+        p = Path(value).expanduser().resolve()
+        guard_not_final_test(p)
+        if not p.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {p}")
+        return p
+
+    candidates: List[Path] = [run_root / "02_checkpoints" / "last.pt"]
+    if ultralytics_layout:
+        candidates.insert(0, run_root / "trainer" / "weights" / "last.pt")
+    for p in candidates:
+        if p.exists():
+            return p.resolve()
+
+    epoch_dir = run_root / "02_checkpoints" / "epochs"
+    if epoch_dir.exists():
+        epoch_files = sorted(epoch_dir.glob("epoch_*.pt"))
+        if epoch_files:
+            return epoch_files[-1].resolve()
+    return None
+
+
+def record_dataset_snapshot(
+    subdirs: Mapping[str, Path],
+    development_root: Path,
+    manifest: Optional[Path],
+    data_files: Sequence[Path],
+    final_freeze: Optional[Path],
+    manifest_audit: Mapping[str, Any],
+) -> Dict[str, Any]:
+    records = []
+    for p in [manifest, *data_files]:
+        if p and Path(p).exists():
+            pp = Path(p)
+            guard_not_final_test(pp)
+            records.append(
+                {
+                    "path": str(pp.resolve()),
+                    "sha256": sha256_file(pp),
+                    "bytes": pp.stat().st_size,
+                }
+            )
+            safe_copy(pp, subdirs["audit"] / pp.name)
+    freeze_rec = None
+    if final_freeze and final_freeze.exists():
+        # We hash/copy only the freeze metadata; we do NOT open Final-Test images/annotations.
+        freeze_rec = {
+            "path": str(final_freeze.resolve()),
+            "sha256": sha256_file(final_freeze),
+            "bytes": final_freeze.stat().st_size,
+        }
+        safe_copy(final_freeze, subdirs["audit"] / "FINAL_TEST_FREEZE_METADATA_ONLY.json")
+    snapshot = {
+        "development_root": str(development_root),
+        "manifest": str(manifest) if manifest else None,
+        "files": records,
+        "manifest_audit": manifest_audit,
+        "final_test_freeze_present": bool(final_freeze),
+        "final_test_freeze_metadata": freeze_rec,
+        "final_test_content_accessed": False,
+    }
+    write_json(subdirs["audit"] / "dataset_snapshot.json", snapshot)
+    return snapshot
+
+
+def save_args(path: Path, args: argparse.Namespace) -> None:
+    write_json(path, vars(args))
+
+
+def ensure_dependencies(required: Sequence[Tuple[str, str]]) -> None:
+    """Install missing non-PyTorch dependencies automatically in Colab."""
+    missing: List[str] = []
+    for import_name, pip_name in required:
+        try:
+            importlib.import_module(import_name)
+        except Exception:
+            if import_name == "torch":
+                raise RuntimeError(
+                    "PyTorch is missing. Use a Google Colab GPU runtime, which provides a CUDA-enabled PyTorch build."
+                )
+            missing.append(pip_name)
+    if not missing:
+        return
+    packages = sorted(set(missing))
+    print("Installing missing Python dependencies:", " ".join(packages), flush=True)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-U", *packages])
+    importlib.invalidate_caches()
+
+
+def resolve_device(requested: str) -> str:
+    requested = str(requested)
+    if requested.lower() == "auto":
+        try:
+            import torch
+            return "0" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    return requested
+
+
+def print_preflight_summary(
+    model_name: str,
+    development_root: Path,
+    manifest: Optional[Path],
+    freeze: Optional[Path],
+    manifest_audit: Mapping[str, Any],
+) -> None:
+    print("\n" + "=" * 88)
+    print("STEP 3 PREFLIGHT")
+    print("=" * 88)
+    print("Model:", model_name)
+    print("Development Pool:", development_root)
+    print("Manifest:", manifest)
+    print("Frozen Final Test metadata:", freeze)
+    print("Final Test content access:", "FORBIDDEN / NONE")
+    print("Manifest rows:", manifest_audit.get("row_count"))
+    print("Group key:", manifest_audit.get("group_key"))
+    print("Group leakage train/val:", manifest_audit.get("group_leakage_count"))
+    print("Split counts:", manifest_audit.get("split_counts"))
+    print("Source counts:", manifest_audit.get("source_counts"))
+    if manifest_audit.get("warnings"):
+        print("Warnings:")
+        for w in manifest_audit["warnings"]:
+            print("  -", w)
+    print("=" * 88 + "\n")
+
+
+def make_base_parser(description: str) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=description, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument("--project-root", type=str, default=None, help="Project root; auto-discovered when omitted.")
+    p.add_argument("--development-root", type=str, default=None, help="Step-2 03_development directory.")
+    p.add_argument("--manifest", type=str, default=None, help="Step-2 dataset_manifest.csv.")
+    p.add_argument(
+        "--output-root", type=str, default=None,
+        help="Root for Step-3 artifacts. In Colab the default is Google Drive: /content/drive/MyDrive/aerial_person_project/step3/runs.",
+    )
+    p.add_argument(
+        "--run-name", type=str, default=None,
+        help="Persistent experiment name. The default fixed_budget_baseline is intentionally stable for automatic resume.",
+    )
+    p.add_argument(
+        "--mount-drive", action=argparse.BooleanOptionalAction, default=True,
+        help="Automatically mount Google Drive when running in Colab.",
+    )
+    p.add_argument(
+        "--allow-missing-final-test-freeze", action="store_true", default=True,
+        help="Compatibility option. Step 3 always allows the private Final Test to be absent and never reads its content.",
+    )
+    p.add_argument("--allow-missing-group-key", action="store_true",
+                   help="Use only if Step-2 group-aware split was independently verified.")
+    p.add_argument("--epochs", type=int, default=45, help="Fixed-budget baseline epoch count.")
+    p.add_argument("--imgsz", type=int, default=1280, help="Fixed-budget baseline square input size.")
+    p.add_argument("--batch", type=int, default=2, help="Batch size. Keep the value fixed when feasible.")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--operating-conf", type=float, default=0.25,
+                   help="Only for descriptive P/R/F1 and failure analysis on internal validation.")
+    p.add_argument("--operating-iou", type=float, default=0.50)
+    p.add_argument("--max-det", type=int, default=1000)
+    p.add_argument("--latency-warmup", type=int, default=10)
+    p.add_argument("--latency-iters", type=int, default=50)
+    p.add_argument("--failure-visuals", type=int, default=24)
+    p.add_argument("--dry-run", action="store_true", help="Run data/config preflight without training.")
+    return p
+
+
+
+MODEL_NAME = "RT-DETR-R18"
+MODEL_SLUG = "rtdetr_r18"
+MODEL_ROLE = "Independent Transformer / end-to-end baseline selected in Step 1"
+PRETRAINED_DEFAULT = "PekingU/rtdetr_r18vd"
+REFERENCE_URL = "https://github.com/lyuwenyu/RT-DETR"
+
+
+def plot_training_history(history: List[Dict[str, Any]], out_dir: Path) -> None:
+    if not history:
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    ensure_dir(out_dir)
+    epochs = [int(r["epoch"]) for r in history]
+
+    fig = plt.figure(figsize=(8, 5))
+    plt.plot(epochs, [float(r["train_loss"]) for r in history], marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Training loss")
+    plt.title("RT-DETR-R18 training loss")
+    plt.grid(True, alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(out_dir / "training_loss.png", dpi=180)
+    plt.close(fig)
+
+    if any(r.get("map50_95") is not None for r in history):
+        fig = plt.figure(figsize=(8, 5))
+        plt.plot(epochs, [float(r.get("map50_95") or 0.0) for r in history], marker="o", label="mAP50-95")
+        plt.plot(epochs, [float(r.get("ap50") or 0.0) for r in history], marker="o", label="AP50")
+        plt.xlabel("Epoch")
+        plt.ylabel("Metric")
+        plt.title("RT-DETR-R18 internal-validation metrics")
+        plt.legend()
+        plt.grid(True, alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(out_dir / "validation_metrics.png", dpi=180)
+        plt.close(fig)
+
+
+def save_history_csv(history: List[Dict[str, Any]], path: Path) -> None:
+    if not history:
+        return
+    ensure_dir(path.parent)
+    keys = sorted(set().union(*(r.keys() for r in history)))
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(history)
+
+
+def load_history_csv(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as f:
+        return [dict(row) for row in csv.DictReader(f)]
+
+
+def make_rtdetr_dataset_class():
+    import numpy as np
+    import torch
+    from PIL import Image
+    from torch.utils.data import Dataset
+
+    class RTDetrCocoDataset(Dataset):
+        def __init__(
+            self,
+            coco_json: Path,
+            image_paths: Mapping[int, Path],
+            processor: Any,
+            train: bool,
+            augment: bool,
+            seed: int,
+        ):
+            self.coco = load_coco_json(coco_json)
+            self.pid = person_category_id(self.coco)
+            self.images = sorted(self.coco["images"], key=lambda x: int(x["id"]))
+            self.image_paths = dict(image_paths)
+            self.processor = processor
+            self.train = train
+            self.augment_enabled = bool(augment)
+            self.seed = seed
+            self.anns_by_image: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+            for ann in self.coco["annotations"]:
+                if int(ann["category_id"]) == self.pid:
+                    self.anns_by_image[int(ann["image_id"])].append(dict(ann))
+
+            self.albu = None
+            if train and augment:
+                try:
+                    import albumentations as A
+                    self.albu = A.Compose(
+                        [
+                            A.HorizontalFlip(p=0.50),
+                            A.RandomBrightnessContrast(
+                                brightness_limit=0.15, contrast_limit=0.15, p=0.30
+                            ),
+                            A.HueSaturationValue(
+                                hue_shift_limit=6, sat_shift_limit=18, val_shift_limit=15, p=0.20
+                            ),
+                            A.Affine(
+                                scale=(0.90, 1.10),
+                                translate_percent=(-0.05, 0.05),
+                                rotate=(-5.0, 5.0),
+                                shear=(-1.0, 1.0),
+                                p=0.35,
+                            ),
+                        ],
+                        bbox_params=A.BboxParams(
+                            format="coco",
+                            label_fields=["category_ids"],
+                            min_visibility=0.20,
+                            clip=True,
+                        ),
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Albumentations is required for the RT-DETR training augmentation pipeline."
+                    ) from exc
+
+        def set_augmentation(self, enabled: bool) -> None:
+            self.augment_enabled = bool(enabled)
+
+        def __len__(self) -> int:
+            return len(self.images)
+
+        def __getitem__(self, index: int) -> Dict[str, Any]:
+            im_info = self.images[index]
+            iid = int(im_info["id"])
+            path = self.image_paths[iid]
+            image = Image.open(path).convert("RGB")
+            anns = [dict(a) for a in self.anns_by_image.get(iid, [])]
+
+            if self.train and self.augment_enabled and self.albu is not None:
+                arr = np.asarray(image)
+                bboxes = [list(map(float, a["bbox"])) for a in anns]
+                category_ids = [0 for _ in anns]  # model label is always 0=person
+                transformed = self.albu(image=arr, bboxes=bboxes, category_ids=category_ids)
+                image = Image.fromarray(transformed["image"])
+                new_anns = []
+                for bbox in transformed["bboxes"]:
+                    x, y, w, h = map(float, bbox)
+                    if w <= 0 or h <= 0:
+                        continue
+                    new_anns.append(
+                        {
+                            "bbox": [x, y, w, h],
+                            "category_id": 0,
+                            "area": w * h,
+                            "iscrowd": 0,
+                        }
+                    )
+                anns_model = new_anns
+            else:
+                anns_model = []
+                for a in anns:
+                    x, y, w, h = map(float, a["bbox"])
+                    anns_model.append(
+                        {
+                            "bbox": [x, y, w, h],
+                            "category_id": 0,
+                            "area": float(a.get("area", w * h)),
+                            "iscrowd": int(a.get("iscrowd", 0)),
+                        }
+                    )
+
+            target = {
+                "image_id": iid,
+                "annotations": anns_model,
+            }
+            encoded = self.processor(images=image, annotations=target, return_tensors="pt")
+            sample = {
+                "pixel_values": encoded["pixel_values"].squeeze(0),
+                "labels": encoded["labels"][0],
+                "image_id": iid,
+            }
+            if "pixel_mask" in encoded:
+                sample["pixel_mask"] = encoded["pixel_mask"].squeeze(0)
+            return sample
+
+    return RTDetrCocoDataset
+
+
+def collate_rtdetr(batch: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    import torch
+    out: Dict[str, Any] = {
+        "pixel_values": torch.stack([b["pixel_values"] for b in batch]),
+        "labels": [b["labels"] for b in batch],
+        "image_ids": [int(b["image_id"]) for b in batch],
+    }
+    if "pixel_mask" in batch[0]:
+        out["pixel_mask"] = torch.stack([b["pixel_mask"] for b in batch])
+    return out
+
+
+def move_label_dicts(labels: Sequence[Mapping[str, Any]], device: Any) -> List[Dict[str, Any]]:
+    moved = []
+    for lab in labels:
+        moved.append(
+            {
+                k: (v.to(device) if hasattr(v, "to") else v)
+                for k, v in lab.items()
+            }
+        )
+    return moved
+
+
+@contextlib.contextmanager
+def autocast_context(enabled: bool):
+    try:
+        import torch
+        if enabled and torch.cuda.is_available():
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                yield
+        else:
+            yield
+    except Exception:
+        yield
+
+
+def predict_rtdetr_coco(
+    model: Any,
+    processor: Any,
+    coco_json: Path,
+    image_paths: Mapping[int, Path],
+    device: Any,
+    score_threshold: float,
+    out_json: Path,
+) -> List[Dict[str, Any]]:
+    import torch
+    from PIL import Image
+
+    coco = load_coco_json(coco_json)
+    pid = person_category_id(coco)
+    preds: List[Dict[str, Any]] = []
+    model.eval()
+
+    with torch.inference_mode():
+        for idx, im_info in enumerate(sorted(coco["images"], key=lambda x: int(x["id"])), start=1):
+            iid = int(im_info["id"])
+            path = image_paths[iid]
+            image = Image.open(path).convert("RGB")
+            width, height = image.size
+            inputs = processor(images=image, return_tensors="pt")
+            model_inputs = {
+                k: v.to(device)
+                for k, v in inputs.items()
+                if hasattr(v, "to")
+            }
+            outputs = model(**model_inputs)
+            target_sizes = torch.tensor([[height, width]], device=device)
+            processed = processor.post_process_object_detection(
+                outputs, target_sizes=target_sizes, threshold=score_threshold
+            )[0]
+            boxes = processed["boxes"].detach().cpu().tolist()
+            scores = processed["scores"].detach().cpu().tolist()
+            labels = processed["labels"].detach().cpu().tolist()
+            for box, score, label in zip(boxes, scores, labels):
+                if int(label) != 0:
+                    continue
+                preds.append(
+                    {
+                        "image_id": iid,
+                        "category_id": pid,
+                        "bbox": [float(x) for x in xyxy_to_xywh(box)],
+                        "score": float(score),
+                    }
+                )
+            if idx % 100 == 0 or idx == len(coco["images"]):
+                print(f"[RT-DETR eval] {idx}/{len(coco['images'])} internal-val images", flush=True)
+
+    write_json(out_json, preds)
+    return preds
+
+
+def save_torch_checkpoint(
+    path: Path,
+    model: Any,
+    optimizer: Any,
+    scheduler: Any,
+    epoch: int,
+    best_metric: float,
+    args: argparse.Namespace,
+) -> None:
+    import torch
+    ensure_dir(path.parent)
+    payload = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict() if optimizer else None,
+        "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+        "epoch": epoch,
+        "best_metric": best_metric,
+        "cli_args": vars(args),
+        "saved_utc": utc_now(),
+    }
+    torch.save(payload, path)
+
+
+def load_torch_checkpoint(path: Path, model: Any, optimizer: Any = None, scheduler: Any = None) -> Dict[str, Any]:
+    import torch
+    ckpt = torch.load(path, map_location="cpu")
+    model.load_state_dict(ckpt["model_state_dict"])
+    if optimizer is not None and ckpt.get("optimizer_state_dict"):
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    if scheduler is not None and ckpt.get("scheduler_state_dict"):
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    return ckpt
+
+
+def main() -> None:
+    parser = make_base_parser(
+        "Train the final Step-3 RT-DETR-R18 baseline and archive all information required by the Step-3 report."
+    )
+    parser.add_argument("--coco-train", type=str, default=None)
+    parser.add_argument("--coco-val", type=str, default=None)
+    parser.add_argument("--pretrained", type=str, default=PRETRAINED_DEFAULT)
+    parser.add_argument("--lr", type=float, default=1.0e-4)
+    parser.add_argument("--lr-backbone", type=float, default=1.0e-5)
+    parser.add_argument("--weight-decay", type=float, default=1.0e-4)
+    parser.add_argument("--warmup-epochs", type=float, default=1.0)
+    parser.add_argument("--grad-clip", type=float, default=0.1)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--augmentation", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--close-augmentation", type=int, default=10,
+                        help="Disable train augmentation for the last N fixed-budget epochs.")
+    parser.add_argument("--resume", type=str, default="auto", help="auto = resume from this run's Drive last.pt when available; none = start fresh; or provide an explicit checkpoint path.")
+    parser.add_argument("--save-epoch-predictions", action=argparse.BooleanOptionalAction, default=False, help="Keep large per-epoch COCO prediction JSON files. Metrics are always saved; final predictions are always saved.")
+    args = parser.parse_args()
+
+    mount_google_drive_if_requested(args.mount_drive)
+    project_root = Path(args.project_root).expanduser().resolve() if args.project_root else discover_project_root()
+    development_root = discover_development_root(project_root, args.development_root)
+    manifest = discover_manifest(development_root, args.manifest)
+    coco_train = discover_coco_json(development_root, "train", args.coco_train)
+    coco_val = discover_coco_json(development_root, "val", args.coco_val)
+    guard_not_final_test(development_root, manifest, coco_train, coco_val)
+    freeze = require_frozen_final_test(project_root, args.allow_missing_final_test_freeze)
+
+    rows = load_manifest_rows(manifest)
+    manifest_audit = audit_manifest(rows)
+    assert_manifest_safe(manifest_audit, args.allow_missing_group_key)
+
+    train_coco_data = load_coco_json(coco_train)
+    val_coco_data = load_coco_json(coco_val)
+    train_summary = validate_person_only_coco(train_coco_data)
+    val_summary = validate_person_only_coco(val_coco_data)
+
+    print_preflight_summary(MODEL_NAME, development_root, manifest, freeze, manifest_audit)
+    print("COCO train:", train_summary)
+    print("COCO val:", val_summary)
+    if args.dry_run:
+        print("Dry run complete. No training was started.")
+        return
+
+    ensure_dependencies([
+        ("torch", "torch"),
+        ("torchvision", "torchvision"),
+        ("transformers", "transformers>=4.53.0"),
+        ("albumentations", "albumentations"),
+        ("pycocotools", "pycocotools"),
+        ("PIL", "pillow"),
+        ("numpy", "numpy"),
+        ("matplotlib", "matplotlib"),
+    ])
+
+    import torch
+    from torch.utils.data import DataLoader
+    from transformers import AutoImageProcessor, RTDetrForObjectDetection, get_cosine_schedule_with_warmup
+
+    device_string = resolve_device(args.device)
+    if device_string == "cpu":
+        device = torch.device("cpu")
+    else:
+        device = torch.device(f"cuda:{int(device_string)}")
+    gpu_audit = verify_l4_environment(device_string)
+    set_global_seed(args.seed, args.deterministic)
+
+    output_root = (
+        Path(args.output_root).expanduser().resolve()
+        if args.output_root
+        else default_drive_output_root(project_root)
+    )
+    run_id, run_root, sub = create_run_tree(output_root, MODEL_SLUG, args.run_name)
+    started_utc = utc_now()
+    save_args(sub["config"] / "cli_args.json", args)
+    env = capture_environment()
+    env["project_git"] = git_info(project_root)
+    env["training_gpu_audit"] = gpu_audit
+    write_json(sub["audit"] / "environment.json", env)
+    dataset_snapshot = record_dataset_snapshot(
+        sub, development_root, manifest, [coco_train, coco_val], freeze, manifest_audit
+    )
+
+    protocol = {
+        "name": "step3_fixed_budget_baseline",
+        "target_class": "person",
+        "epochs": args.epochs,
+        "imgsz": args.imgsz,
+        "batch": args.batch,
+        "seed": args.seed,
+        "device": str(device),
+        "amp": args.amp,
+        "optimizer": "AdamW",
+        "lr": args.lr,
+        "lr_backbone": args.lr_backbone,
+        "weight_decay": args.weight_decay,
+        "lr_schedule": "cosine with linear warmup",
+        "warmup_epochs": args.warmup_epochs,
+        "grad_clip": args.grad_clip,
+        "augmentation": {
+            "enabled": args.augmentation,
+            "horizontal_flip_p": 0.50,
+            "brightness_contrast_p": 0.30,
+            "hsv_p": 0.20,
+            "affine_p": 0.35,
+            "affine_rotate_deg": [-5.0, 5.0],
+            "affine_scale": [0.90, 1.10],
+            "affine_translate_percent": [-0.05, 0.05],
+            "close_augmentation_last_epochs": args.close_augmentation,
+            "mosaic": False,
+            "mixup": False,
+        },
+        "fairness_note": (
+            "The same Step-2 split, seed, 45-epoch budget, and 1280 project input are used for controlled comparison. "
+            "The optimizer/augmentation recipe is recorded explicitly and is not claimed to be a universal RT-DETR optimum."
+        ),
+        "final_test_used": False,
+        "private_final_test_required_for_step3": False,
+        "checkpoint_policy": "save every completed epoch to persistent Google Drive storage",
+        "default_colab_output_root": str(default_drive_output_root(project_root)),
+        "requested_training_hardware": "Google Colab NVIDIA L4 GPU",
+    }
+    write_json(sub["config"] / "resolved_protocol.json", protocol)
+
+    model_meta = {
+        "name": MODEL_NAME,
+        "slug": MODEL_SLUG,
+        "role": MODEL_ROLE,
+        "pretrained": args.pretrained,
+        "reference_url": REFERENCE_URL,
+        "implementation": "Hugging Face Transformers RTDetrForObjectDetection using the converted official PekingU R18 checkpoint",
+        "architecture_modification": "classification head resized to one class (person); architecture otherwise RT-DETR-R18",
+        "input_resolution_note": (
+            "1280 is the project fixed-budget comparison resolution. The original public COCO checkpoint was trained/evaluated at its own reference resolution."
+        ),
+    }
+    write_json(sub["config"] / "model_metadata.json", model_meta)
+
+    print("Loading processor/checkpoint:", args.pretrained)
+    processor = AutoImageProcessor.from_pretrained(
+        args.pretrained,
+        size={"height": args.imgsz, "width": args.imgsz},
+    )
+    model = RTDetrForObjectDetection.from_pretrained(
+        args.pretrained,
+        num_labels=1,
+        id2label={0: "person"},
+        label2id={"person": 0},
+        ignore_mismatched_sizes=True,
+    )
+    model.to(device)
+
+    train_paths = resolve_coco_image_paths(train_coco_data, development_root, strict=True)
+    val_paths = resolve_coco_image_paths(val_coco_data, development_root, strict=True)
+
+    DatasetClass = make_rtdetr_dataset_class()
+    train_ds = DatasetClass(
+        coco_train, train_paths, processor, train=True, augment=args.augmentation, seed=args.seed
+    )
+    val_ds = DatasetClass(
+        coco_val, val_paths, processor, train=False, augment=False, seed=args.seed
+    )
+
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch,
+        shuffle=True,
+        num_workers=args.workers,
+        pin_memory=torch.cuda.is_available(),
+        collate_fn=collate_rtdetr,
+        drop_last=False,
+        generator=generator,
+        persistent_workers=False,
+    )
+
+    backbone_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "backbone" in name:
+            backbone_params.append(param)
+        else:
+            other_params.append(param)
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": other_params, "lr": args.lr},
+            {"params": backbone_params, "lr": args.lr_backbone},
+        ],
+        weight_decay=args.weight_decay,
+    )
+    total_steps = max(1, args.epochs * len(train_loader))
+    warmup_steps = int(max(0.0, args.warmup_epochs) * len(train_loader))
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
+    )
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=(args.amp and torch.cuda.is_available()))
+    except Exception:
+        scaler = torch.cuda.amp.GradScaler(enabled=(args.amp and torch.cuda.is_available()))
+
+    start_epoch = 1
+    best_metric = -1.0
+    history_path = sub["metrics"] / "training_history.csv"
+    history: List[Dict[str, Any]] = load_history_csv(history_path)
+    resume_path = resolve_resume_checkpoint(run_root, args.resume, ultralytics_layout=False)
+    if resume_path is not None:
+        resume_state = load_torch_checkpoint(resume_path, model, optimizer, scheduler)
+        start_epoch = int(resume_state.get("epoch", 0)) + 1
+        best_metric = float(resume_state.get("best_metric", -1.0))
+        existing_best = sub["checkpoints"] / "best.pt"
+        if existing_best.exists():
+            try:
+                best_state_for_resume = torch.load(existing_best, map_location="cpu")
+                best_metric = max(best_metric, float(best_state_for_resume.get("best_metric", -1.0)))
+            except Exception:
+                pass
+        print(f"Resuming RT-DETR-R18 from Google Drive checkpoint: {resume_path}")
+        print("Next epoch:", start_epoch)
+        append_jsonl(
+            sub["audit"] / "resume_history.jsonl",
+            {"utc": utc_now(), "mode": "resume", "checkpoint": str(resume_path), "next_epoch": start_epoch},
+        )
+    else:
+        append_jsonl(
+            sub["audit"] / "resume_history.jsonl",
+            {"utc": utc_now(), "mode": "fresh", "checkpoint": args.pretrained, "next_epoch": 1},
+        )
+
+    reset_peak_vram()
+    train_start = time.perf_counter()
+    best_path = sub["checkpoints"] / "best.pt"
+    last_path = sub["checkpoints"] / "last.pt"
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        if args.augmentation and args.close_augmentation > 0:
+            train_ds.set_augmentation(epoch <= args.epochs - args.close_augmentation)
+        model.train()
+        epoch_loss = 0.0
+        seen_batches = 0
+        epoch_start = time.perf_counter()
+
+        for step, batch in enumerate(train_loader, start=1):
+            pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+            labels = move_label_dicts(batch["labels"], device)
+            kwargs: Dict[str, Any] = {"pixel_values": pixel_values, "labels": labels}
+            if "pixel_mask" in batch:
+                kwargs["pixel_mask"] = batch["pixel_mask"].to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+            with autocast_context(args.amp):
+                outputs = model(**kwargs)
+                loss = outputs.loss
+
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                optimizer.step()
+            scheduler.step()
+
+            epoch_loss += float(loss.detach().cpu())
+            seen_batches += 1
+            if step % 20 == 0 or step == len(train_loader):
+                print(
+                    f"Epoch {epoch}/{args.epochs} | batch {step}/{len(train_loader)} | "
+                    f"loss={epoch_loss/max(seen_batches,1):.5f}",
+                    flush=True,
+                )
+
+        # Persist both last.pt and a unique epoch checkpoint directly in Google Drive.
+        # This guarantees that training can be resumed after any completed epoch.
+        epoch_checkpoint = sub["checkpoints"] / "epochs" / f"epoch_{epoch:03d}.pt"
+        save_torch_checkpoint(last_path, model, optimizer, scheduler, epoch, best_metric, args)
+        save_torch_checkpoint(epoch_checkpoint, model, optimizer, scheduler, epoch, best_metric, args)
+
+        # Full internal-validation AP every epoch. This is intentionally the INTERNAL val set only.
+        if args.save_epoch_predictions:
+            epoch_pred_json = sub["predictions"] / f"epoch_{epoch:03d}.json"
+        else:
+            epoch_pred_json = ensure_dir(Path("/content/step3_epoch_eval") / MODEL_SLUG / run_id) / f"epoch_{epoch:03d}.json"
+        preds = predict_rtdetr_coco(
+            model, processor, coco_val, val_paths, device, 0.001, epoch_pred_json
+        )
+        eval_metrics = coco_eval_metrics(coco_val, epoch_pred_json, max_dets=args.max_det)
+        map_metric = float(eval_metrics.get("ap50_95") or 0.0)
+
+        if map_metric > best_metric:
+            best_metric = map_metric
+            save_torch_checkpoint(best_path, model, optimizer, scheduler, epoch, best_metric, args)
+
+        if not args.save_epoch_predictions:
+            with contextlib.suppress(Exception):
+                epoch_pred_json.unlink()
+
+        row = {
+            "epoch": epoch,
+            "train_loss": epoch_loss / max(seen_batches, 1),
+            "map50_95": eval_metrics.get("ap50_95"),
+            "ap50": eval_metrics.get("ap50"),
+            "ar50_95": eval_metrics.get("ar50_95"),
+            "lr_main": optimizer.param_groups[0]["lr"],
+            "lr_backbone": optimizer.param_groups[1]["lr"],
+            "augmentation_enabled": train_ds.augment_enabled,
+            "epoch_seconds": time.perf_counter() - epoch_start,
+            "peak_vram_mb_so_far": peak_vram_mb(),
+        }
+        history.append(row)
+        save_history_csv(history, history_path)
+        plot_training_history(history, sub["curves"])
+        write_json(sub["metrics"] / f"epoch_{epoch:03d}_coco_metrics.json", eval_metrics)
+        print(
+            f"Epoch {epoch} complete | loss={row['train_loss']:.5f} | "
+            f"mAP50-95={map_metric:.5f} | AP50={float(eval_metrics.get('ap50') or 0.0):.5f}",
+            flush=True,
+        )
+
+    cuda_sync()
+    training_seconds = time.perf_counter() - train_start
+    peak_mb = peak_vram_mb()
+
+    if not best_path.exists():
+        shutil.copy2(last_path, best_path)
+    best_state = load_torch_checkpoint(best_path, model)
+    best_epoch = int(best_state.get("epoch", args.epochs))
+    best_metric = float(best_state.get("best_metric", best_metric))
+    model.to(device)
+    model.eval()
+
+    # Save standard HF-format best model/processor for future reproducible use.
+    hf_best_dir = sub["checkpoints"] / "best_hf"
+    ensure_dir(hf_best_dir)
+    model.save_pretrained(hf_best_dir)
+    processor.save_pretrained(hf_best_dir)
+
+    pred_json = sub["predictions"] / "internal_val_predictions.coco.json"
+    predictions = predict_rtdetr_coco(
+        model, processor, coco_val, val_paths, device, 0.001, pred_json
+    )
+    standardized = coco_eval_metrics(coco_val, pred_json, max_dets=args.max_det)
+    operating = threshold_operating_metrics(
+        val_coco_data, predictions, args.operating_conf, args.operating_iou
+    )
+    write_json(sub["metrics"] / "standardized_coco_metrics.json", standardized)
+    write_json(sub["metrics"] / "operating_point_metrics.json", operating)
+    save_operating_metrics_csv(sub["metrics"] / "failure_ranking.csv", operating)
+    save_failure_visuals(
+        val_coco_data, predictions, val_paths, operating, sub["failures"],
+        limit=args.failure_visuals, score_threshold=args.operating_conf
+    )
+
+    from PIL import Image
+    first_iid = int(val_coco_data["images"][0]["id"])
+    latency_image = val_paths[first_iid]
+    latency_pil = Image.open(latency_image).convert("RGB")
+
+    def latency_call():
+        inputs = processor(images=latency_pil, return_tensors="pt")
+        kwargs = {k: v.to(device) for k, v in inputs.items() if hasattr(v, "to")}
+        with torch.inference_mode():
+            outputs = model(**kwargs)
+            target_sizes = torch.tensor([[latency_pil.height, latency_pil.width]], device=device)
+            processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.25)
+
+    latency = benchmark_latencies(
+        latency_call, warmup=args.latency_warmup, iterations=args.latency_iters
+    )
+
+    metrics = {
+        "primary_source": "standardized COCO internal-validation evaluation",
+        "map50_95": standardized.get("ap50_95"),
+        "ap50": standardized.get("ap50"),
+        "precision": operating.get("precision"),
+        "recall": operating.get("recall"),
+        "f1": operating.get("f1"),
+        "size_metrics": {
+            k: {
+                "ap50_95": standardized.get("size_ap50_95", {}).get(k),
+                "ap50": standardized.get("size_ap50", {}).get(k),
+                "recall_at_operating_point": operating.get("size_recall", {}).get(k, {}).get("recall"),
+                "gt_count": operating.get("size_recall", {}).get(k, {}).get("gt"),
+            }
+            for k in SIZE_BUCKETS
+        },
+        "operating_conf": args.operating_conf,
+        "operating_iou": args.operating_iou,
+    }
+
+    best_rec = checkpoint_record(best_path)
+    last_rec = checkpoint_record(last_path)
+    report = {
+        "schema_version": "step3-run-report-v1",
+        "run_id": run_id,
+        "started_utc": started_utc,
+        "finished_utc": utc_now(),
+        "model": model_meta,
+        "protocol": protocol,
+        "dataset": dataset_snapshot,
+        "environment": env,
+        "training": {
+            "best_epoch": best_epoch,
+            "selection_metric": "internal validation mAP50-95",
+            "best_metric": best_metric,
+            "fixed_budget_completed": True,
+            "history_csv": str(sub["metrics"] / "training_history.csv"),
+        },
+        "metrics": metrics,
+        "runtime": {
+            "training_seconds": training_seconds,
+            "training_hours": training_seconds / 3600.0,
+            "peak_vram_mb": peak_mb,
+            **latency,
+            "latency_scope": "processor resize/normalize + PyTorch model + RT-DETR postprocess; no video decode/render",
+            "latency_image": str(latency_image),
+        },
+        "complexity": {
+            "parameters": count_parameters(model),
+            "flops": None,
+            "flops_note": "Run the official RT-DETR profiling tool separately if a framework-native FLOP number is required.",
+        },
+        "artifacts": {
+            "best_checkpoint": best_rec,
+            "last_checkpoint": last_rec,
+            "best_checkpoint_sha256": best_rec.get("sha256"),
+            "last_checkpoint_sha256": last_rec.get("sha256"),
+            "best_hf_directory": str(hf_best_dir),
+            "predictions_json": str(pred_json),
+            "standardized_metrics_json": str(sub["metrics"] / "standardized_coco_metrics.json"),
+            "failure_ranking_csv": str(sub["metrics"] / "failure_ranking.csv"),
+        },
+        "scientific_notes": [
+            "RT-DETR-R18 is kept as an independent Transformer/end-to-end baseline, not as a YOLO variant.",
+            "The project fixed-budget input is 1280; this must not be confused with the checkpoint's reference COCO protocol.",
+            "The frozen private Final Test is not read in Step 3.",
+            "TensorRT deployment benchmarking belongs to Step 4.",
+        ],
+    }
+    write_json(run_root / "STEP3_RUN_REPORT.json", report)
+    write_markdown_report(run_root / "STEP3_RUN_REPORT.md", report)
+
+    print("\nTraining complete.")
+    print("Run directory:", run_root)
+    print("Best epoch:", best_epoch)
+    print("Primary internal-val mAP50-95:", metrics["map50_95"])
+    print("Primary internal-val AP50:", metrics["ap50"])
+    print("Internal-val Recall@operating-point:", metrics["recall"])
+    print("Peak VRAM MB:", peak_mb)
+    print("Warm median latency ms:", latency.get("warm_latency_median_ms"))
+    print("Best checkpoint:", best_path)
+    print("Private Final Test content accessed: NO (presence is optional in Step 3)")
+
+
+if __name__ == "__main__":
+    main()
