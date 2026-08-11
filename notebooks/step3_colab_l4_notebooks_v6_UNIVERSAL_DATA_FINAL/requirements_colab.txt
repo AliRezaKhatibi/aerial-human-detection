@@ -7,3 +7,5 @@ tqdm>=4.66.0
 pillow
 numpy
 matplotlib
+
+pyyaml>=6.0

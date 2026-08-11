@@ -1,0 +1,32 @@
+{
+  "package": "V6 UNIVERSAL DATA FINAL",
+  "files": {
+    "train_rtdetr_r18_step3.py": {
+      "python_compile": "PASS"
+    },
+    "train_bpd_yolon_lfpn_step3.py": {
+      "python_compile": "PASS"
+    },
+    "train_yolo26s_step3.py": {
+      "python_compile": "PASS"
+    },
+    "02_RTDETR_R18_Step3_Colab_L4_V6_UNIVERSAL_FINAL.ipynb": {
+      "nbformat": "PASS",
+      "stale_outputs": 0,
+      "embedded_engine_identity": "PASS",
+      "cells": 24
+    },
+    "01_YOLO26s_Step3_Colab_L4_V6_UNIVERSAL_FINAL.ipynb": {
+      "nbformat": "PASS",
+      "stale_outputs": 0,
+      "embedded_engine_identity": "PASS",
+      "cells": 24
+    },
+    "03_BPD_YOLOn_LFPN_Step3_Colab_L4_V6_UNIVERSAL_FINAL.ipynb": {
+      "nbformat": "PASS",
+      "stale_outputs": 0,
+      "embedded_engine_identity": "PASS",
+      "cells": 24
+    }
+  }
+}

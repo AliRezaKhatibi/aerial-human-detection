@@ -355,62 +355,454 @@ def discover_project_root(start: Optional[Path] = None) -> Path:
     return start
 
 
+
+def _looks_like_yolo_split_root(path: Path) -> bool:
+    path = Path(path)
+    patterns = [
+        (
+            path / "train" / "images",
+            path / "train" / "labels",
+            path / "val" / "images",
+            path / "val" / "labels",
+        ),
+        (
+            path / "images" / "train",
+            path / "labels" / "train",
+            path / "images" / "val",
+            path / "labels" / "val",
+        ),
+    ]
+    return any(all(p.exists() and p.is_dir() for p in group) for group in patterns)
+
+
+def _looks_like_coco_root(path: Path) -> bool:
+    path = Path(path)
+    pairs = [
+        (path / "instances_train.json", path / "instances_val.json"),
+        (path / "annotations" / "instances_train.json", path / "annotations" / "instances_val.json"),
+        (path / "coco" / "instances_train.json", path / "coco" / "instances_val.json"),
+        (path / "coco" / "annotations" / "instances_train.json", path / "coco" / "annotations" / "instances_val.json"),
+    ]
+    return any(a.exists() and b.exists() for a, b in pairs)
+
+
+def _looks_like_dataset_signature_root(path: Path) -> bool:
+    path = Path(path)
+    return (
+        path.name == "03_development"
+        or _looks_like_yolo_split_root(path)
+        or _looks_like_coco_root(path)
+        or (path / "data.yaml").exists()
+        or (path / "dataset.yaml").exists()
+    )
+
+
+def _signature_candidate_score(path: Path) -> int:
+    path = Path(path)
+    score = 0
+    if path.name == "03_development":
+        score += 40
+    if _looks_like_yolo_split_root(path):
+        score += 35
+    if _looks_like_coco_root(path):
+        score += 35
+    if (path / "data.yaml").exists():
+        score += 20
+    if (path / "dataset.yaml").exists():
+        score += 15
+    for n in ["dataset_manifest.csv", "development_manifest.csv", "manifest.csv"]:
+        if (path / n).exists() or (path.parent / n).exists():
+            score += 8
+    low = str(path).replace("\\", "/").lower()
+    if "03_development" in low:
+        score += 10
+    if "step2" in low or "aerial-person-data" in low:
+        score += 4
+    return score
+
+
+def _bounded_signature_roots(root: Path, max_depth: int = 9, max_hits: int = 50) -> List[Path]:
+    root = Path(root)
+    if not root.exists() or not root.is_dir():
+        return []
+
+    hits: List[Path] = []
+    seen = set()
+    base_depth = len(root.parts)
+    skip_names = {
+        ".git", ".ipynb_checkpoints", "__pycache__", "node_modules",
+        "90_final_test_v1", "final_test", "private_test",
+        "runs", "step3", "outputs", ".Trash",
+    }
+
+    for current, dirs, _files in os.walk(root):
+        current_path = Path(current)
+        depth = len(current_path.parts) - base_depth
+        if depth > max_depth:
+            dirs[:] = []
+            continue
+
+        dirs[:] = [
+            d for d in dirs
+            if d not in skip_names
+            and not d.startswith(".Trash")
+            and "final_test" not in d.lower()
+            and "private_test" not in d.lower()
+        ]
+
+        low = str(current_path).replace("\\", "/").lower()
+        if any(token in low for token in FORBIDDEN_TEST_TOKENS):
+            dirs[:] = []
+            continue
+
+        if _looks_like_dataset_signature_root(current_path):
+            rp = current_path.resolve()
+            key = str(rp)
+            if key not in seen:
+                seen.add(key)
+                hits.append(rp)
+                if len(hits) >= max_hits:
+                    break
+
+    hits.sort(key=lambda p: (-_signature_candidate_score(p), len(p.parts), str(p)))
+    return hits
+
+
+def _find_yolo_split_dirs(dataset_root: Path) -> Optional[Dict[str, Path]]:
+    dataset_root = Path(dataset_root)
+    layouts = [
+        {
+            "train_images": dataset_root / "train" / "images",
+            "train_labels": dataset_root / "train" / "labels",
+            "val_images": dataset_root / "val" / "images",
+            "val_labels": dataset_root / "val" / "labels",
+        },
+        {
+            "train_images": dataset_root / "images" / "train",
+            "train_labels": dataset_root / "labels" / "train",
+            "val_images": dataset_root / "images" / "val",
+            "val_labels": dataset_root / "labels" / "val",
+        },
+    ]
+    for layout in layouts:
+        if all(p.exists() and p.is_dir() for p in layout.values()):
+            return {k: v.resolve() for k, v in layout.items()}
+    return None
+
+
+def _parse_yolo_data_yaml_paths(data_yaml: Path) -> Optional[Dict[str, Path]]:
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"WARNING: PyYAML is unavailable while parsing {data_yaml}: {exc}")
+        return None
+
+    data_yaml = Path(data_yaml).resolve()
+    try:
+        data = yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        print(f"WARNING: Could not parse {data_yaml}: {exc}")
+        return None
+
+    base = data_yaml.parent
+    declared_path = data.get("path")
+    if declared_path:
+        p = Path(str(declared_path))
+        if not p.is_absolute():
+            p = (base / p).resolve()
+        base = p
+
+    def _resolve_entry(value):
+        if not isinstance(value, str):
+            return None
+        p = Path(value)
+        if not p.is_absolute():
+            p = (base / p).resolve()
+        return p
+
+    train_images = _resolve_entry(data.get("train"))
+    val_images = _resolve_entry(data.get("val"))
+    if not train_images or not val_images:
+        return None
+    if not train_images.exists() or not val_images.exists():
+        return None
+
+    def _label_dir(image_dir: Path) -> Optional[Path]:
+        image_dir = image_dir.resolve()
+        parts = list(image_dir.parts)
+        if image_dir.name == "images":
+            candidate = image_dir.parent / "labels"
+            if candidate.exists():
+                return candidate.resolve()
+        if image_dir.parent.name == "images":
+            candidate = image_dir.parent.parent / "labels" / image_dir.name
+            if candidate.exists():
+                return candidate.resolve()
+        idxs = [i for i, x in enumerate(parts) if x == "images"]
+        if idxs:
+            i = idxs[-1]
+            candidate = Path(*parts[:i], "labels", *parts[i + 1:])
+            if candidate.exists():
+                return candidate.resolve()
+        return None
+
+    train_labels = _label_dir(train_images)
+    val_labels = _label_dir(val_images)
+    if not train_labels or not val_labels:
+        return None
+
+    return {
+        "train_images": train_images.resolve(),
+        "train_labels": train_labels.resolve(),
+        "val_images": val_images.resolve(),
+        "val_labels": val_labels.resolve(),
+    }
+
+
+def _find_data_yaml_near(dataset_root: Path) -> Optional[Path]:
+    dataset_root = Path(dataset_root)
+    for base in [dataset_root, dataset_root.parent]:
+        for name in ["data.yaml", "dataset.yaml"]:
+            p = base / name
+            if p.exists():
+                return p.resolve()
+    for name in ["data.yaml", "dataset.yaml"]:
+        hits = list(dataset_root.glob(f"**/{name}"))
+        if hits:
+            return hits[0].resolve()
+    return None
+
+
+def _discover_yolo_layout(dataset_root: Path) -> Optional[Dict[str, Path]]:
+    direct = _find_yolo_split_dirs(dataset_root)
+    if direct:
+        return direct
+    yml = _find_data_yaml_near(dataset_root)
+    if yml:
+        parsed = _parse_yolo_data_yaml_paths(yml)
+        if parsed:
+            parsed["data_yaml"] = yml
+            return parsed
+    return None
+
+
+def _image_files(image_dir: Path) -> List[Path]:
+    exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+    return sorted(
+        p.resolve()
+        for p in Path(image_dir).rglob("*")
+        if p.is_file() and p.suffix.lower() in exts
+    )
+
+
+def _convert_yolo_split_to_coco(
+    image_dir: Path,
+    label_dir: Path,
+    out_json: Path,
+    split_name: str,
+) -> Path:
+    from PIL import Image
+
+    image_dir = Path(image_dir).resolve()
+    label_dir = Path(label_dir).resolve()
+    out_json = Path(out_json)
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+
+    images = []
+    annotations = []
+    ann_id = 1
+    object_count = 0
+    bad_classes = set()
+    malformed = []
+
+    files = _image_files(image_dir)
+    if not files:
+        raise FileNotFoundError(f"No images found in YOLO {split_name} image directory: {image_dir}")
+
+    for image_id, image_path in enumerate(files, start=1):
+        with Image.open(image_path) as im:
+            width, height = im.size
+
+        rel = image_path.relative_to(image_dir)
+        images.append({
+            "id": image_id,
+            "file_name": str(rel).replace("\\", "/"),
+            "width": int(width),
+            "height": int(height),
+        })
+
+        label_path = label_dir / rel.with_suffix(".txt")
+        if not label_path.exists():
+            continue
+
+        lines = [x.strip() for x in label_path.read_text(encoding="utf-8-sig").splitlines() if x.strip()]
+        for line_no, line in enumerate(lines, start=1):
+            parts = line.split()
+            if len(parts) < 5:
+                malformed.append(f"{label_path}:{line_no}")
+                continue
+            try:
+                cls = int(float(parts[0]))
+                xc, yc, bw, bh = map(float, parts[1:5])
+            except Exception:
+                malformed.append(f"{label_path}:{line_no}")
+                continue
+
+            if cls != 0:
+                bad_classes.add(cls)
+                continue
+            if not all(0.0 <= v <= 1.0 for v in [xc, yc, bw, bh]) or bw <= 0 or bh <= 0:
+                malformed.append(f"{label_path}:{line_no}")
+                continue
+
+            x = (xc - bw / 2.0) * width
+            y = (yc - bh / 2.0) * height
+            w = bw * width
+            h = bh * height
+
+            x = max(0.0, min(float(width), x))
+            y = max(0.0, min(float(height), y))
+            w = max(0.0, min(float(width) - x, w))
+            h = max(0.0, min(float(height) - y, h))
+            if w <= 0 or h <= 0:
+                malformed.append(f"{label_path}:{line_no}")
+                continue
+
+            annotations.append({
+                "id": ann_id,
+                "image_id": image_id,
+                "category_id": 0,
+                "bbox": [x, y, w, h],
+                "area": w * h,
+                "iscrowd": 0,
+            })
+            ann_id += 1
+            object_count += 1
+
+    if bad_classes:
+        raise RuntimeError(
+            f"YOLO {split_name} labels contain non-person class IDs: {sorted(bad_classes)}. "
+            "Step 3 requires person-only class 0."
+        )
+    if malformed:
+        raise RuntimeError(
+            f"Malformed YOLO labels detected in {split_name}: {len(malformed)}. "
+            f"Examples: {malformed[:5]}"
+        )
+    if object_count == 0:
+        raise RuntimeError(
+            f"No person annotations were found in YOLO {split_name} labels under {label_dir}. "
+            "Training cannot start without labeled person instances."
+        )
+
+    payload = {
+        "images": images,
+        "annotations": annotations,
+        "categories": [{"id": 0, "name": "person", "supercategory": "person"}],
+        "info": {
+            "description": f"Runtime COCO conversion for Step-3 {split_name}",
+            "source_format": "YOLO person-only",
+        },
+    }
+    out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(
+        f"Created runtime COCO {split_name}: {out_json} | "
+        f"images={len(images)}, objects={object_count}"
+    )
+    return out_json.resolve()
+
+
+def _runtime_coco_from_yolo(dataset_root: Path, split: str) -> Optional[Path]:
+    layout = _discover_yolo_layout(dataset_root)
+    if not layout:
+        return None
+
+    runtime_dir = Path(dataset_root) / "_step3_runtime_coco"
+    if split == "train":
+        return _convert_yolo_split_to_coco(
+            layout["train_images"],
+            layout["train_labels"],
+            runtime_dir / "instances_train.json",
+            "train",
+        )
+    return _convert_yolo_split_to_coco(
+        layout["val_images"],
+        layout["val_labels"],
+        runtime_dir / "instances_val.json",
+        "val",
+    )
+
+
 def discover_development_root(project_root: Path, explicit: Optional[str]) -> Path:
-    # A placeholder or a stale explicit path is NOT fatal. The code falls back to
-    # automatic discovery, which directly fixes common Colab path-copy mistakes.
     if not is_auto_or_placeholder_path(explicit):
         p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
         if p.exists() and p.is_dir():
-            return p.resolve()
-        print(
-            f"WARNING: The configured Development root does not exist: {p}. "
-            "Falling back to automatic discovery."
-        )
+            if _looks_like_dataset_signature_root(p) or _discover_yolo_layout(p):
+                print(f"Using explicit training dataset root: {p.resolve()}")
+                return p.resolve()
+            print(
+                f"WARNING: The explicit development root exists but does not expose a recognized "
+                f"train/val dataset layout: {p}. Falling back to automatic discovery."
+            )
+        else:
+            print(
+                f"WARNING: The configured development root does not exist: {p}. "
+                "Falling back to automatic discovery."
+            )
 
-    candidates = [
+    candidates: List[Path] = []
+
+    fixed = [
         project_root / "workspace" / "aerial-person-data" / "03_development",
         project_root / "aerial-person-data" / "03_development",
         project_root / "03_development",
-        Path("/content/drive/MyDrive/aerial_person_project/workspace/aerial-person-data/03_development"),
-        Path("/content/drive/MyDrive/aerial_person_project/aerial-person-data/03_development"),
-        Path("/content/drive/MyDrive/aerial_person_project/03_development"),
-        Path("/content/drive/MyDrive/aerial-person-step2-pipeline/workspace/aerial-person-data/03_development"),
+        project_root / "dataset",
+        project_root / "data",
+        project_root,
     ]
-    valid = []
-    for c in candidates:
+    for c in fixed:
         if c.exists() and c.is_dir():
-            guard_not_final_test(c)
-            valid.append(c.resolve())
+            low = str(c).replace("\\", "/").lower()
+            if any(token in low for token in FORBIDDEN_TEST_TOKENS):
+                continue
+            if _looks_like_dataset_signature_root(c) or _discover_yolo_layout(c):
+                candidates.append(c.resolve())
 
-    if not valid:
-        valid.extend(_bounded_named_dirs(project_root, "03_development", max_depth=7))
+    candidates.extend(_bounded_signature_roots(project_root, max_depth=9))
 
     mydrive = Path("/content/drive/MyDrive")
-    if not valid and mydrive.exists():
-        valid.extend(_bounded_named_dirs(mydrive, "03_development", max_depth=7))
+    if mydrive.exists():
+        candidates.extend(_bounded_signature_roots(mydrive, max_depth=9))
 
-    # De-duplicate while preserving deterministic ordering.
     unique: Dict[str, Path] = {}
-    for p in valid:
-        unique[str(p.resolve())] = p.resolve()
+    for p in candidates:
+        rp = p.resolve()
+        low = str(rp).replace("\\", "/").lower()
+        if any(token in low for token in FORBIDDEN_TEST_TOKENS):
+            continue
+        unique[str(rp)] = rp
+
     valid = list(unique.values())
+    valid.sort(key=lambda p: (-_signature_candidate_score(p), len(p.parts), str(p)))
 
     if valid:
-        valid.sort(key=lambda p: (-_development_candidate_score(p), len(p.parts), str(p)))
         selected = valid[0]
-        print(f"Using Step-2 Development Pool: {selected}")
+        print(f"Using detected Step-2 training/validation dataset root: {selected}")
+        print(f"Dataset signature score: {_signature_candidate_score(selected)}")
         if len(valid) > 1:
-            print("Other detected Development candidates:")
-            for other in valid[1:5]:
-                print(f"  - {other} (score={_development_candidate_score(other)})")
+            print("Other detected train/val candidates:")
+            for other in valid[1:6]:
+                print(f"  - {other} (score={_signature_candidate_score(other)})")
         return selected
 
     raise FileNotFoundError(
-        "Could not locate the Step-2 Development Pool. Expected a directory named "
-        "'03_development', normally at "
-        "<project>/workspace/aerial-person-data/03_development. "
-        "The private Final Test is not required for Step 3."
+        "Could not find any labeled Step-2 training/validation dataset in Google Drive. "
+        "Accepted inputs are: canonical 03_development; YOLO train/images+train/labels and "
+        "val/images+val/labels; YOLO images/train+labels/train and images/val+labels/val; "
+        "a valid data.yaml; or COCO train/val JSONs. "
+        "The private >=1000-image Final Test is NOT required and is intentionally ignored. "
+        "If no candidate exists, Step 2 must be executed/finalized before Step 3 can train."
     )
 
 
@@ -1511,11 +1903,170 @@ def make_base_parser(description: str) -> argparse.ArgumentParser:
 
 
 
-MODEL_NAME = "YOLO26s"
-MODEL_SLUG = "yolo26s"
-MODEL_ROLE = "Product-oriented real-time baseline selected in Step 1"
-PRETRAINED_DEFAULT = "yolo26s.pt"
-REFERENCE_URL = "https://docs.ultralytics.com/models/yolo26/"
+MODEL_NAME = "BPD-YOLOn/L-FPN"
+MODEL_SLUG = "bpd_yolon_lfpn"
+MODEL_ROLE = "Tiny-object-specialized UAV baseline selected in Step 1"
+BASE_PRETRAINED_DEFAULT = "yolov8n.pt"
+ARTICLE_URL = "https://www.nature.com/articles/s41598-025-16878-6"
+DYSAMPLE_REFERENCE_URL = "https://github.com/tiny-smart/dysample"
+
+BPD_PROJECT_YAML = r"""
+# Paper-faithful PROJECT REIMPLEMENTATION of BPD-YOLOn/L-FPN for Step 3.
+# Important: the Scientific Reports paper describes the architecture but does not
+# publish an official BPD-YOLO source-code repository in its Data Availability section.
+# This YAML therefore MUST be reported as a project reimplementation, not author code.
+#
+# Paper-aligned elements represented here:
+# - YOLOv8n-style lightweight backbone.
+# - Original terminal SPPF removed.
+# - P2-centric high-resolution detection path.
+# - L-FPN-like dual-phase progressive fusion.
+# - DSPF-style blocks realized explicitly with depthwise dilated convolutions r=1,2,3.
+# - DySample-style content-aware point-sampling upsampling operator.
+# - One target class: person.
+#
+# The baseline uses a single high-resolution P2 detection output to emphasize tiny objects.
+# Keep this architecture frozen during the controlled baseline; architecture ablations
+# belong in separately named runs.
+
+nc: 1
+depth_multiple: 1.0
+width_multiple: 1.0
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [16, 3, 2]]       # 0  P1/2
+  - [-1, 1, Conv, [32, 3, 2]]       # 1  P2/4
+  - [-1, 1, C2f, [32, True]]        # 2  C2
+  - [-1, 1, Conv, [64, 3, 2]]       # 3  P3/8
+  - [-1, 2, C2f, [64, True]]        # 4  C3
+  - [-1, 1, Conv, [128, 3, 2]]      # 5  P4/16
+  - [-1, 2, C2f, [128, True]]       # 6  C4
+  - [-1, 1, Conv, [256, 3, 2]]      # 7  P5/32
+  - [-1, 1, C2f, [256, True]]       # 8  C5 (no original SPPF)
+
+head:
+  # --- DAFF phase 1: down(C2) + C3 -> DSPF-like L1^3 -------------------------
+  - [2, 1, Conv, [64, 3, 2]]        # 9  down C2 to P3
+  - [[9, 4], 1, Concat, [1]]        # 10
+  - [-1, 1, Conv, [64, 1, 1]]       # 11 base
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 1]]  # 12 dw dilated r1
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 2]]  # 13 dw dilated r2
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 3]]  # 14 dw dilated r3
+  - [[11, 12, 13, 14], 1, Concat, [1]]       # 15
+  - [-1, 1, Conv, [64, 1, 1]]       # 16 L1^3
+
+  # --- DAFF phase 1: C4 + up(C5) -> DSPF-like L1^4 --------------------------
+  - [8, 1, Conv, [128, 1, 1]]       # 17
+  - [-1, 1, DySample, [128, 2]]     # 18 up C5 P5->P4
+  - [[6, 18], 1, Concat, [1]]       # 19
+  - [-1, 1, Conv, [128, 1, 1]]      # 20 base
+  - [-1, 1, Conv, [128, 3, 1, null, 128, 1]] # 21
+  - [-1, 1, Conv, [128, 3, 1, null, 128, 2]] # 22
+  - [-1, 1, Conv, [128, 3, 1, null, 128, 3]] # 23
+  - [[20, 21, 22, 23], 1, Concat, [1]]       # 24
+  - [-1, 1, Conv, [128, 1, 1]]      # 25 L1^4
+
+  # --- DAFF phase 2: up(L1^4) + L1^3 -> L2^3 -------------------------------
+  - [25, 1, Conv, [64, 1, 1]]       # 26
+  - [-1, 1, DySample, [64, 2]]      # 27
+  - [[16, 27], 1, Concat, [1]]      # 28
+  - [-1, 1, Conv, [64, 1, 1]]       # 29
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 1]]   # 30
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 2]]   # 31
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 3]]   # 32
+  - [[29, 30, 31, 32], 1, Concat, [1]]       # 33
+  - [-1, 1, Conv, [64, 1, 1]]       # 34 L2^3
+
+  # --- DEI/deep semantic injection: up(C5) + L2^3 -> L3^3 -------------------
+  - [8, 1, Conv, [64, 1, 1]]        # 35
+  - [-1, 1, DySample, [64, 4]]      # 36 P5->P3
+  - [[34, 36], 1, Concat, [1]]      # 37
+  - [-1, 1, Conv, [64, 1, 1]]       # 38
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 1]]   # 39
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 2]]   # 40
+  - [-1, 1, Conv, [64, 3, 1, null, 64, 3]]   # 41
+  - [[38, 39, 40, 41], 1, Concat, [1]]       # 42
+  - [-1, 1, Conv, [64, 1, 1]]       # 43 L3^3
+
+  # --- Progressive high-resolution P2 fusion -------------------------------
+  - [16, 1, Conv, [32, 1, 1]]       # 44
+  - [-1, 1, DySample, [32, 2]]      # 45 L1^2
+  - [34, 1, Conv, [32, 1, 1]]       # 46
+  - [-1, 1, DySample, [32, 2]]      # 47
+  - [[45, 47, 2], 1, Concat, [1]]   # 48 + shallow C2
+  - [-1, 1, C2f, [32, True]]        # 49 L2^2
+  - [43, 1, Conv, [32, 1, 1]]       # 50
+  - [-1, 1, DySample, [32, 2]]      # 51
+  - [[45, 49, 51, 2], 1, Concat, [1]] # 52 dense P2 fusion
+  - [-1, 2, C2f, [64, True]]        # 53 feature extraction
+  - [-1, 1, Conv, [64, 3, 1]]       # 54 final P2 feature
+  - [[54], 1, Detect, [nc]]          # 55 person detector
+"""
+
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class DySample(nn.Module):
+        """
+        Compact project implementation of content-aware point-sampling upsampling.
+
+        It follows the DySample principle used by BPD-YOLO:
+          - predict content-dependent sampling offsets,
+          - add offsets to a regular sampling grid,
+          - use torch.grid_sample to obtain the upsampled feature.
+
+        This implementation is written for this project; it is not copied from the
+        DySample authors' source and must not be described as bit-for-bit author code.
+        """
+
+        def __init__(self, channels: int, scale: int = 2, max_offset: float = 0.25):
+            super().__init__()
+            self.channels = int(channels)
+            self.scale = int(scale)
+            self.max_offset = float(max_offset)
+            # A regular Conv2d is used instead of LazyConv2d because Ultralytics
+            # counts parameters while parsing the YAML, before the first forward pass.
+            self.offset = nn.Conv2d(self.channels, 2, kernel_size=1, stride=1, padding=0)
+            with torch.no_grad():
+                nn.init.zeros_(self.offset.weight)
+                if self.offset.bias is not None:
+                    nn.init.zeros_(self.offset.bias)
+
+        def forward(self, x):
+            if x.shape[1] != self.channels:
+                raise RuntimeError(
+                    f"DySample expected {self.channels} channels but received {x.shape[1]}."
+                )
+            b, c, h, w = x.shape
+            oh, ow = h * self.scale, w * self.scale
+
+            raw = self.offset(x)
+            raw = F.interpolate(raw, size=(oh, ow), mode="bilinear", align_corners=False)
+            raw = torch.tanh(raw) * self.max_offset
+
+            ys = (torch.arange(oh, device=x.device, dtype=x.dtype) + 0.5) / oh * 2.0 - 1.0
+            xs = (torch.arange(ow, device=x.device, dtype=x.dtype) + 0.5) / ow * 2.0 - 1.0
+            yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+            base = torch.stack((xx, yy), dim=-1).unsqueeze(0).expand(b, -1, -1, -1)
+
+            dx = raw[:, 0] * (2.0 / max(w, 1))
+            dy = raw[:, 1] * (2.0 / max(h, 1))
+            grid = base + torch.stack((dx, dy), dim=-1)
+            return F.grid_sample(
+                x, grid, mode="bilinear", padding_mode="border", align_corners=False
+            )
+
+except Exception:
+    DySample = None  # dependency check in main() will provide a clear error
+
+
+def write_bpd_yaml(path: Path) -> None:
+    ensure_dir(path.parent)
+    path.write_text(BPD_PROJECT_YAML.strip() + "\n", encoding="utf-8")
 
 
 def _mean_or_none(value: Any) -> Optional[float]:
@@ -1530,7 +2081,7 @@ def _mean_or_none(value: Any) -> Optional[float]:
             return None
 
 
-def export_ultralytics_predictions_to_coco(
+def export_ultralytics_predictions_to_coco_bpd(
     model: Any,
     coco_json: Path,
     development_root: Path,
@@ -1543,8 +2094,8 @@ def export_ultralytics_predictions_to_coco(
     pid = person_category_id(coco)
     image_paths = resolve_coco_image_paths(coco, development_root, strict=True)
     predictions: List[Dict[str, Any]] = []
-
     ordered_images = sorted(coco["images"], key=lambda x: int(x["id"]))
+
     for idx, im in enumerate(ordered_images, start=1):
         iid = int(im["id"])
         path = image_paths[iid]
@@ -1556,29 +2107,26 @@ def export_ultralytics_predictions_to_coco(
             iou=0.70,
             max_det=max_det,
             verbose=False,
-            stream=False,
         )
-        if not results:
-            continue
-        result = results[0]
-        boxes = getattr(result, "boxes", None)
-        if boxes is not None and len(boxes):
-            xyxy = boxes.xyxy.detach().cpu().numpy()
-            conf = boxes.conf.detach().cpu().numpy()
-            cls = boxes.cls.detach().cpu().numpy()
-            for b, s, c in zip(xyxy, conf, cls):
-                if int(round(float(c))) != 0:
-                    continue
-                predictions.append(
-                    {
-                        "image_id": iid,
-                        "category_id": pid,
-                        "bbox": [float(x) for x in xyxy_to_xywh(b.tolist())],
-                        "score": float(s),
-                    }
-                )
+        if results:
+            boxes = getattr(results[0], "boxes", None)
+            if boxes is not None and len(boxes):
+                xyxy = boxes.xyxy.detach().cpu().numpy()
+                conf = boxes.conf.detach().cpu().numpy()
+                cls = boxes.cls.detach().cpu().numpy()
+                for b, s, c in zip(xyxy, conf, cls):
+                    if int(round(float(c))) != 0:
+                        continue
+                    predictions.append(
+                        {
+                            "image_id": iid,
+                            "category_id": pid,
+                            "bbox": [float(x) for x in xyxy_to_xywh(b.tolist())],
+                            "score": float(s),
+                        }
+                    )
         if idx % 100 == 0 or idx == len(ordered_images):
-            print(f"[COCO export] {idx}/{len(ordered_images)} internal-val images", flush=True)
+            print(f"[BPD COCO export] {idx}/{len(ordered_images)} internal-val images", flush=True)
 
     write_json(out_json, predictions)
     return predictions, image_paths
@@ -1586,39 +2134,45 @@ def export_ultralytics_predictions_to_coco(
 
 def main() -> None:
     parser = make_base_parser(
-        "Train the final Step-3 YOLO26s baseline with complete reproducibility and reporting artifacts."
+        "Train the Step-3 BPD-YOLOn/L-FPN tiny-object baseline and archive all report-required artifacts."
     )
     parser.add_argument("--data-yaml", type=str, default=None)
-    parser.add_argument("--coco-val", type=str, default=None,
-                        help="COCO internal-validation JSON used only for standardized reporting.")
-    parser.add_argument("--pretrained", type=str, default=PRETRAINED_DEFAULT)
-    parser.add_argument("--optimizer", type=str, default="auto",
-                        help="Ultralytics optimizer. 'auto' preserves the official fine-tuning behavior.")
-    parser.add_argument("--lr0", type=float, default=None,
-                        help="Optional explicit initial LR. Omit to let the selected optimizer recipe resolve it.")
-    parser.add_argument("--lrf", type=float, default=None)
-    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--coco-val", type=str, default=None)
+    parser.add_argument("--base-pretrained", type=str, default=BASE_PRETRAINED_DEFAULT,
+                        help="YOLOv8n checkpoint used for compatible backbone transfer.")
+    parser.add_argument("--external-model-yaml", type=str, default=None,
+                        help="Optional exact author/repository model YAML if obtained later. "
+                             "When omitted, the embedded paper-faithful project reimplementation is used.")
+    parser.add_argument("--optimizer", type=str, default="SGD")
+    parser.add_argument("--lr0", type=float, default=0.01,
+                        help="Paper reports initial LR=0.01 for BPD-YOLO.")
+    parser.add_argument("--lrf", type=float, default=0.01,
+                        help="Cosine final LR factor: 0.01 -> final LR ~0.0001 from 0.01.")
+    parser.add_argument("--momentum", type=float, default=0.937)
+    parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--cos-lr", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mosaic", type=float, default=0.50,
-                        help="Conservative project baseline; ablate separately rather than claiming global optimality.")
-    parser.add_argument("--mixup", type=float, default=0.00)
-    parser.add_argument("--copy-paste", type=float, default=0.00)
-    parser.add_argument("--close-mosaic", type=int, default=10)
+                        help="Paper uses Mosaic but does not publish a probability; this is a conservative project baseline.")
+    parser.add_argument("--mixup", type=float, default=0.10,
+                        help="Paper uses MixUp but does not publish a probability; record/ablate this project value.")
+    parser.add_argument("--close-mosaic", type=int, default=10,
+                        help="Paper disables data augmentation in its last 10 epochs.")
     parser.add_argument("--degrees", type=float, default=5.0)
     parser.add_argument("--translate", type=float, default=0.08)
     parser.add_argument("--scale", type=float, default=0.35)
-    parser.add_argument("--shear", type=float, default=0.0)
-    parser.add_argument("--perspective", type=float, default=0.0)
     parser.add_argument("--fliplr", type=float, default=0.50)
     parser.add_argument("--flipud", type=float, default=0.0)
-    parser.add_argument("--hsv-h", type=float, default=0.01)
-    parser.add_argument("--hsv-s", type=float, default=0.30)
-    parser.add_argument("--hsv-v", type=float, default=0.20)
+    parser.add_argument("--native-paper-budget", action="store_true",
+                        help="Switch to the paper's 300-epoch optimization budget. "
+                             "Do NOT mix this run into the fixed-45-epoch controlled comparison.")
     parser.add_argument("--save-period", type=int, default=1, help="Save an Ultralytics checkpoint after every epoch to Google Drive.")
     parser.add_argument("--resume", type=str, default="auto", help="auto = resume from this run's Drive last.pt when available; none = start fresh; or provide an explicit checkpoint path.")
     args = parser.parse_args()
+
+    if args.native_paper_budget:
+        args.epochs = 300
 
     mount_google_drive_if_requested(args.mount_drive)
     project_root = resolve_project_root_arg(args.project_root)
@@ -1657,6 +2211,7 @@ def main() -> None:
     ])
 
     import torch
+    import ultralytics.nn.tasks as ultralytics_tasks
     from ultralytics import YOLO
 
     device = resolve_device(args.device)
@@ -1684,8 +2239,32 @@ def main() -> None:
         source_yaml=data_yaml,
     )
 
+    # Register the project DySample operator so Ultralytics YAML parsing can resolve it.
+    if DySample is None:
+        raise RuntimeError("PyTorch is required before constructing BPD-YOLOn/L-FPN.")
+    setattr(ultralytics_tasks, "DySample", DySample)
+
+    if args.external_model_yaml:
+        model_yaml = Path(args.external_model_yaml).expanduser().resolve()
+        guard_not_final_test(model_yaml)
+        if not model_yaml.exists():
+            raise FileNotFoundError(model_yaml)
+        implementation_status = "external architecture file supplied by user"
+        safe_copy(model_yaml, sub["config"] / model_yaml.name)
+    else:
+        model_yaml = sub["config"] / "bpd_yolon_lfpn_project_reimplementation.yaml"
+        write_bpd_yaml(model_yaml)
+        implementation_status = (
+            "paper-faithful project reimplementation; not official author source code"
+        )
+
+    protocol_name = (
+        "bpd_paper_native_300epoch_budget"
+        if args.native_paper_budget
+        else "step3_fixed_budget_baseline"
+    )
     protocol = {
-        "name": "step3_fixed_budget_baseline",
+        "name": protocol_name,
         "target_class": "person",
         "epochs": args.epochs,
         "imgsz": args.imgsz,
@@ -1696,30 +2275,35 @@ def main() -> None:
         "optimizer": args.optimizer,
         "lr0": args.lr0,
         "lrf": args.lrf,
+        "momentum": args.momentum,
         "weight_decay": args.weight_decay,
-        "cos_lr": args.cos_lr,
+        "lr_schedule": "cosine",
         "augmentation": {
             "mosaic": args.mosaic,
             "mixup": args.mixup,
-            "copy_paste": args.copy_paste,
-            "close_mosaic": args.close_mosaic,
+            "fliplr": args.fliplr,
+            "flipud": args.flipud,
             "degrees": args.degrees,
             "translate": args.translate,
             "scale": args.scale,
-            "shear": args.shear,
-            "perspective": args.perspective,
-            "fliplr": args.fliplr,
-            "flipud": args.flipud,
-            "hsv_h": args.hsv_h,
-            "hsv_s": args.hsv_s,
-            "hsv_v": args.hsv_v,
+            "close_mosaic_last_epochs": args.close_mosaic,
+        },
+        "paper_training_context": {
+            "paper_visdrone_epochs": 300,
+            "paper_visdrone_batch": 8,
+            "paper_optimizer": "SGD",
+            "paper_initial_lr": 0.01,
+            "paper_final_lr": 0.0001,
+            "paper_augmentations_named": ["Mosaic", "MixUp", "flipping"],
+            "paper_augmentation_disabled_last_epochs": 10,
+            "paper_tinyperson_imgsz": 1024,
+            "paper_tinyperson_batch": 2,
         },
         "fairness_note": (
-            "45 epochs / 1280 / fixed split / seed are project controls. "
-            "Augmentation values are conservative project baseline defaults and must be reported as such."
+            "Unless --native-paper-budget is set, the project fixed 45-epoch / 1280 protocol takes precedence "
+            "for cross-model comparison. Paper-reported probabilities for Mosaic/MixUp are not available, "
+            "so project probabilities are explicitly recorded and must be ablated separately."
         ),
-        "tiling": False,
-        "p2_modification": False,
         "final_test_used": False,
         "private_final_test_required_for_step3": False,
         "checkpoint_policy": "save every completed epoch to persistent Google Drive storage",
@@ -1733,28 +2317,48 @@ def main() -> None:
         "name": MODEL_NAME,
         "slug": MODEL_SLUG,
         "role": MODEL_ROLE,
-        "pretrained": args.pretrained,
-        "reference_url": REFERENCE_URL,
-        "architecture_modification": "none",
-        "p2_enabled": False,
-        "tiling_enabled": False,
+        "base_pretrained": args.base_pretrained,
+        "article_url": ARTICLE_URL,
+        "dysample_reference_url": DYSAMPLE_REFERENCE_URL,
+        "implementation_status": implementation_status,
+        "architecture_file": str(model_yaml),
+        "architecture_file_sha256": sha256_file(model_yaml),
+        "paper_aligned_components": [
+            "YOLOv8n-family lightweight backbone",
+            "terminal SPPF removed",
+            "L-FPN high-resolution information flow",
+            "DAFF-like progressive shallow/deep feature fusion",
+            "DSPF-style depthwise separable dilated convolutions with dilation 1/2/3",
+            "DySample-style content-aware point-sampling upsampling",
+            "P2-centric small-object detection",
+        ],
+        "critical_reporting_note": (
+            "The Scientific Reports article exposes data availability but no official BPD-YOLO source-code link. "
+            "When the embedded architecture is used, Step 3 must call it a project reimplementation."
+        ),
     }
     write_json(sub["config"] / "model_metadata.json", model_meta)
 
     resume_path = resolve_resume_checkpoint(run_root, args.resume, ultralytics_layout=True)
     if resume_path is not None:
-        print(f"Resuming YOLO26s training from Google Drive checkpoint: {resume_path}")
-        model = YOLO(str(resume_path))
+        print(f"Resuming BPD-YOLOn/L-FPN training from Google Drive checkpoint: {resume_path}")
+        # Register the custom operator before loading the custom checkpoint.
+        setattr(ultralytics_tasks, "DySample", DySample)
+        model = YOLO(str(resume_path), task="detect")
         append_jsonl(
             sub["audit"] / "resume_history.jsonl",
             {"utc": utc_now(), "mode": "resume", "checkpoint": str(resume_path)},
         )
     else:
-        print(f"Starting YOLO26s from pretrained checkpoint: {args.pretrained}")
-        model = YOLO(args.pretrained)
+        print("Building BPD-YOLOn/L-FPN architecture:", model_yaml)
+        model = YOLO(str(model_yaml), task="detect")
+        # Transfer compatible backbone weights from YOLOv8n. Ultralytics loads only shape-compatible keys.
+        if args.base_pretrained:
+            print("Transferring compatible weights from:", args.base_pretrained)
+            model.load(args.base_pretrained)
         append_jsonl(
             sub["audit"] / "resume_history.jsonl",
-            {"utc": utc_now(), "mode": "fresh", "checkpoint": args.pretrained},
+            {"utc": utc_now(), "mode": "fresh", "checkpoint": args.base_pretrained},
         )
 
     train_kwargs: Dict[str, Any] = dict(
@@ -1769,21 +2373,22 @@ def main() -> None:
         single_cls=True,
         amp=args.amp,
         optimizer=args.optimizer,
+        lr0=args.lr0,
+        lrf=args.lrf,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
         cos_lr=args.cos_lr,
         mosaic=args.mosaic,
         mixup=args.mixup,
-        copy_paste=args.copy_paste,
         close_mosaic=args.close_mosaic,
         degrees=args.degrees,
         translate=args.translate,
         scale=args.scale,
-        shear=args.shear,
-        perspective=args.perspective,
         fliplr=args.fliplr,
         flipud=args.flipud,
-        hsv_h=args.hsv_h,
-        hsv_s=args.hsv_s,
-        hsv_v=args.hsv_v,
+        perspective=0.0,
+        shear=0.0,
+        copy_paste=0.0,
         patience=max(args.epochs + 10, 1000),
         save=True,
         save_period=args.save_period,
@@ -1797,18 +2402,24 @@ def main() -> None:
         exist_ok=True,
         verbose=True,
     )
-    if args.lr0 is not None:
-        train_kwargs["lr0"] = args.lr0
-    if args.lrf is not None:
-        train_kwargs["lrf"] = args.lrf
-    if args.weight_decay is not None:
-        train_kwargs["weight_decay"] = args.weight_decay
     if resume_path is not None:
         # Official Ultralytics resume flow: load last.pt first, then train(resume=True).
-        # The loaded checkpoint restores optimizer, scheduler, scaler, and epoch state.
         train_kwargs["resume"] = True
 
     write_json(sub["config"] / "train_kwargs.json", train_kwargs)
+
+    # Fingerprint the executable implementation used for scientific traceability.
+    script_path = Path(__file__).resolve()
+    write_json(
+        sub["audit"] / "implementation_fingerprint.json",
+        {
+            "script": str(script_path),
+            "script_sha256": sha256_file(script_path),
+            "model_yaml": str(model_yaml),
+            "model_yaml_sha256": sha256_file(model_yaml),
+            "implementation_status": implementation_status,
+        },
+    )
 
     reset_peak_vram()
     train_start = time.perf_counter()
@@ -1838,7 +2449,10 @@ def main() -> None:
             target_dir = sub["metrics"] if src.suffix == ".csv" else sub["curves"]
             safe_copy(src, target_dir / src.name)
 
+    # Re-register custom operator before loading custom checkpoint in a fresh YOLO object.
+    setattr(ultralytics_tasks, "DySample", DySample)
     eval_model = YOLO(str(best_copy))
+
     val_result = eval_model.val(
         data=str(data_yaml),
         split="val",
@@ -1859,20 +2473,18 @@ def main() -> None:
     )
 
     pred_json = sub["predictions"] / "internal_val_predictions.coco.json"
-    predictions, image_paths = export_ultralytics_predictions_to_coco(
+    predictions, image_paths = export_ultralytics_predictions_to_coco_bpd(
         eval_model, coco_val, development_root, args.imgsz, device, args.max_det, pred_json
     )
-    coco_data = load_coco_json(coco_val)
-    validate_person_only_coco(coco_data)
     standardized = coco_eval_metrics(coco_val, pred_json, max_dets=args.max_det)
     operating = threshold_operating_metrics(
-        coco_data, predictions, args.operating_conf, args.operating_iou
+        coco_val_data, predictions, args.operating_conf, args.operating_iou
     )
     write_json(sub["metrics"] / "standardized_coco_metrics.json", standardized)
     write_json(sub["metrics"] / "operating_point_metrics.json", operating)
     save_operating_metrics_csv(sub["metrics"] / "failure_ranking.csv", operating)
     save_failure_visuals(
-        coco_data, predictions, image_paths, operating, sub["failures"],
+        coco_val_data, predictions, image_paths, operating, sub["failures"],
         limit=args.failure_visuals, score_threshold=args.operating_conf
     )
 
@@ -1893,7 +2505,7 @@ def main() -> None:
         except Exception:
             pass
 
-    first_iid = int(coco_data["images"][0]["id"])
+    first_iid = int(coco_val_data["images"][0]["id"])
     latency_image = image_paths[first_iid]
     latency = benchmark_latencies(
         lambda: eval_model.predict(
@@ -1947,7 +2559,8 @@ def main() -> None:
         "training": {
             "best_epoch": best_epoch,
             "selection_metric": "internal validation mAP50-95",
-            "fixed_budget_completed": True,
+            "fixed_budget_completed": not args.native_paper_budget,
+            "paper_native_budget_run": args.native_paper_budget,
             "trainer_save_dir": str(trainer_save_dir),
         },
         "metrics": metrics,
@@ -1961,21 +2574,30 @@ def main() -> None:
         },
         "complexity": {
             "parameters": count_parameters(getattr(eval_model, "model", eval_model)),
-            "flops": "Use Ultralytics model.info()/profile output archived in logs; value depends on input size.",
+            "paper_reference_bpd_yolon": {
+                "parameters_million": 1.50,
+                "gflops_reference_protocol": 11.4,
+                "note": "Reference paper values; do not substitute for profiling this project reimplementation.",
+            },
+            "project_flops": "Profile this exact checkpoint/input with framework profiler before reporting.",
         },
         "artifacts": {
             "best_checkpoint": best_rec,
             "last_checkpoint": last_rec,
             "best_checkpoint_sha256": best_rec.get("sha256"),
             "last_checkpoint_sha256": last_rec.get("sha256"),
+            "architecture_file": str(model_yaml),
+            "architecture_file_sha256": sha256_file(model_yaml),
             "predictions_json": str(pred_json),
             "standardized_metrics_json": str(sub["metrics"] / "standardized_coco_metrics.json"),
             "failure_ranking_csv": str(sub["metrics"] / "failure_ranking.csv"),
         },
         "scientific_notes": [
-            "YOLO26s is trained without P2 or tiling in the primary baseline, as fixed in Step 1.",
-            "The private Final Test is not read in Step 3.",
-            "Final deployment TensorRT benchmarking belongs to Step 4, not this training script.",
+            "The paper's exact public BPD-YOLO training source was not identified in the article's Data Availability section.",
+            "When using the embedded architecture, report this run as a paper-faithful project reimplementation, not official author code.",
+            "DSPF dilation rates 1/2/3, depthwise separable dilated convolution, DySample principle, high-resolution L-FPN flow, and YOLOv8n-family base follow the paper description.",
+            "The frozen private Final Test is not read in Step 3.",
+            "TensorRT deployment benchmarking belongs to Step 4.",
         ],
     }
     write_json(run_root / "STEP3_RUN_REPORT.json", report)
@@ -1983,6 +2605,8 @@ def main() -> None:
 
     print("\nTraining complete.")
     print("Run directory:", run_root)
+    print("Implementation status:", implementation_status)
+    print("Best epoch:", best_epoch)
     print("Primary internal-val mAP50-95:", metrics["map50_95"])
     print("Primary internal-val AP50:", metrics["ap50"])
     print("Internal-val Recall@operating-point:", metrics["recall"])
