@@ -200,49 +200,173 @@ def guard_not_final_test(*paths: Optional[Path]) -> None:
             )
 
 
+AUTO_PATH_SENTINELS = {
+    "", "auto", "none", "null", "detect", "discover", "automatic",
+}
+
+PLACEHOLDER_PATH_TOKENS = (
+    "/path/to/",
+    "\\path\\to\\",
+    "path/to/your",
+    "your_project",
+    "your/project",
+    "03_development_directory",
+    "<project",
+    "<path",
+    "{project",
+    "{path",
+)
+
+
+def is_auto_or_placeholder_path(value: Optional[str]) -> bool:
+    if value is None:
+        return True
+    raw = str(value).strip()
+    low = raw.lower().replace("\\", "/")
+    if low in AUTO_PATH_SENTINELS:
+        return True
+    return any(token.replace("\\", "/") in low for token in PLACEHOLDER_PATH_TOKENS)
+
+
+def _bounded_named_dirs(root: Path, target_name: str, max_depth: int = 7) -> List[Path]:
+    """Find directories with a specific name without unbounded Google Drive recursion."""
+    root = Path(root)
+    if not root.exists() or not root.is_dir():
+        return []
+    hits: List[Path] = []
+    base_depth = len(root.parts)
+    skip_names = {
+        ".git", ".ipynb_checkpoints", "__pycache__", "node_modules",
+        "90_final_test_v1", "runs", "step3", "outputs",
+    }
+    for current, dirs, _files in os.walk(root):
+        current_path = Path(current)
+        depth = len(current_path.parts) - base_depth
+        if depth >= max_depth:
+            dirs[:] = []
+            continue
+        dirs[:] = [
+            d for d in dirs
+            if d not in skip_names and not d.startswith(".Trash")
+        ]
+        for d in list(dirs):
+            if d == target_name:
+                candidate = (current_path / d).resolve()
+                low = str(candidate).replace("\\", "/").lower()
+                if not any(token in low for token in FORBIDDEN_TEST_TOKENS):
+                    hits.append(candidate)
+                # No need to walk inside Development while locating it.
+                with contextlib.suppress(ValueError):
+                    dirs.remove(d)
+    return hits
+
+
+def _development_candidate_score(path: Path) -> int:
+    """Score a Step-2 Development candidate by the artifacts required by Step 3."""
+    path = Path(path)
+    score = 0
+    if path.name == "03_development":
+        score += 20
+    for p in [
+        path / "train" / "images",
+        path / "val" / "images",
+        path / "images" / "train",
+        path / "images" / "val",
+    ]:
+        if p.exists():
+            score += 4
+    parent = path.parent
+    checks = [
+        ("data.yaml", 8),
+        ("dataset.yaml", 6),
+        ("instances_train.json", 8),
+        ("instances_val.json", 8),
+        ("dataset_manifest.csv", 6),
+        ("development_manifest.csv", 5),
+        ("manifest.csv", 3),
+    ]
+    for name, points in checks:
+        if (parent / name).exists() or any(parent.glob(f"*/{name}")):
+            score += points
+    return score
+
+
+def _project_root_from_development(development_root: Path) -> Path:
+    """Infer the Step-2 project root from the canonical Step-2 directory layout."""
+    dev = Path(development_root).resolve()
+    # Expected: <project>/workspace/aerial-person-data/03_development
+    if dev.parent.name == "aerial-person-data" and dev.parent.parent.name == "workspace":
+        return dev.parent.parent.parent.resolve()
+    # Alternate: <project>/aerial-person-data/03_development
+    if dev.parent.name == "aerial-person-data":
+        return dev.parent.parent.resolve()
+    return dev.parent.resolve()
+
+
+def resolve_project_root_arg(explicit: Optional[str]) -> Path:
+    """Use a valid explicit project root, otherwise auto-discover it safely."""
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
+        if p.exists():
+            return p.resolve()
+        print(
+            f"WARNING: The configured project root does not exist: {p}. "
+            "Falling back to automatic Google Drive discovery."
+        )
+    return discover_project_root()
+
+
 def discover_project_root(start: Optional[Path] = None) -> Path:
     start = (start or Path.cwd()).resolve()
 
-    # Colab-first locations. These checks are intentionally shallow so that the
-    # script does not recursively scan the user's entire Google Drive.
-    colab_candidates = [
+    standard_candidates = [
         Path("/content/drive/MyDrive/aerial_person_project"),
         Path("/content/drive/MyDrive/aerial_person_final_product"),
         Path("/content/drive/MyDrive/aerial-person-project"),
         Path("/content/drive/MyDrive/aerial-person-step2-pipeline"),
         Path("/content/drive/MyDrive/step2"),
     ]
-    mydrive = Path("/content/drive/MyDrive")
-    if mydrive.exists():
-        try:
-            colab_candidates.extend([p for p in mydrive.iterdir() if p.is_dir()])
-        except Exception:
-            pass
-    for p in colab_candidates:
+    for p in standard_candidates:
         if p.exists() and (
             (p / "workspace" / "aerial-person-data" / "03_development").exists()
             or (p / "aerial-person-data" / "03_development").exists()
             or (p / "03_development").exists()
-            or (p / "workspace").exists()
-            or (p / ".git").exists()
         ):
             return p.resolve()
 
-    candidates = [start] + list(start.parents)
-    markers = ("aerial-person-step2-pipeline", "workspace", ".git")
-    for p in candidates:
-        if any((p / m).exists() for m in markers):
-            return p
+    # First inspect the working directory and its parents.
+    for p in [start, *start.parents]:
+        if (
+            (p / "workspace" / "aerial-person-data" / "03_development").exists()
+            or (p / "aerial-person-data" / "03_development").exists()
+            or (p / "03_development").exists()
+        ):
+            return p.resolve()
+
+    # Bounded MyDrive search is the final Colab fallback.
+    mydrive = Path("/content/drive/MyDrive")
+    hits = _bounded_named_dirs(mydrive, "03_development", max_depth=7) if mydrive.exists() else []
+    if hits:
+        hits.sort(key=lambda p: (-_development_candidate_score(p), len(p.parts), str(p)))
+        selected = hits[0]
+        print(f"Auto-discovered Step-2 Development Pool: {selected}")
+        return _project_root_from_development(selected)
+
     return start
 
 
 def discover_development_root(project_root: Path, explicit: Optional[str]) -> Path:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    # A placeholder or a stale explicit path is NOT fatal. The code falls back to
+    # automatic discovery, which directly fixes common Colab path-copy mistakes.
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(f"Development root not found: {p}")
-        return p
+        if p.exists() and p.is_dir():
+            return p.resolve()
+        print(
+            f"WARNING: The configured Development root does not exist: {p}. "
+            "Falling back to automatic discovery."
+        )
 
     candidates = [
         project_root / "workspace" / "aerial-person-data" / "03_development",
@@ -251,21 +375,50 @@ def discover_development_root(project_root: Path, explicit: Optional[str]) -> Pa
         Path("/content/drive/MyDrive/aerial_person_project/workspace/aerial-person-data/03_development"),
         Path("/content/drive/MyDrive/aerial_person_project/aerial-person-data/03_development"),
         Path("/content/drive/MyDrive/aerial_person_project/03_development"),
+        Path("/content/drive/MyDrive/aerial-person-step2-pipeline/workspace/aerial-person-data/03_development"),
     ]
+    valid = []
     for c in candidates:
-        if c.exists():
+        if c.exists() and c.is_dir():
             guard_not_final_test(c)
-            return c.resolve()
+            valid.append(c.resolve())
 
-    # Controlled fallback: search only for directory name.
-    hits = [p for p in project_root.rglob("03_development") if p.is_dir()]
-    hits = [p for p in hits if not any(t in str(p).lower() for t in FORBIDDEN_TEST_TOKENS)]
-    if hits:
-        return hits[0].resolve()
+    if not valid:
+        valid.extend(_bounded_named_dirs(project_root, "03_development", max_depth=7))
+
+    mydrive = Path("/content/drive/MyDrive")
+    if not valid and mydrive.exists():
+        valid.extend(_bounded_named_dirs(mydrive, "03_development", max_depth=7))
+
+    # De-duplicate while preserving deterministic ordering.
+    unique: Dict[str, Path] = {}
+    for p in valid:
+        unique[str(p.resolve())] = p.resolve()
+    valid = list(unique.values())
+
+    if valid:
+        valid.sort(key=lambda p: (-_development_candidate_score(p), len(p.parts), str(p)))
+        selected = valid[0]
+        print(f"Using Step-2 Development Pool: {selected}")
+        if len(valid) > 1:
+            print("Other detected Development candidates:")
+            for other in valid[1:5]:
+                print(f"  - {other} (score={_development_candidate_score(other)})")
+        return selected
+
     raise FileNotFoundError(
-        "Could not locate the Step-2 Development Pool. Pass --development-root explicitly."
+        "Could not locate the Step-2 Development Pool. Expected a directory named "
+        "'03_development', normally at "
+        "<project>/workspace/aerial-person-data/03_development. "
+        "The private Final Test is not required for Step 3."
     )
 
+
+def infer_project_root_from_development(development_root: Path, current_project_root: Path) -> Path:
+    inferred = _project_root_from_development(development_root)
+    if inferred.exists():
+        return inferred
+    return current_project_root
 
 def discover_final_test_freeze(project_root: Path) -> Optional[Path]:
     candidates = [
@@ -316,12 +469,12 @@ def find_file(root: Path, names: Sequence[str]) -> Optional[Path]:
 
 
 def discover_manifest(development_root: Path, explicit: Optional[str]) -> Optional[Path]:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(p)
-        return p
+        if p.exists():
+            return p.resolve()
+        print(f"WARNING: Manifest path not found: {p}. Falling back to automatic discovery.")
     return find_file(
         development_root.parent,
         ["dataset_manifest.csv", "development_manifest.csv", "manifest.csv"],
@@ -329,12 +482,12 @@ def discover_manifest(development_root: Path, explicit: Optional[str]) -> Option
 
 
 def discover_data_yaml(development_root: Path, explicit: Optional[str]) -> Path:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(p)
-        return p
+        if p.exists():
+            return p.resolve()
+        print(f"WARNING: data.yaml path not found: {p}. Falling back to automatic discovery.")
     hit = find_file(development_root.parent, ["data.yaml", "dataset.yaml"])
     if not hit:
         raise FileNotFoundError("YOLO data.yaml not found. Pass --data-yaml explicitly.")
@@ -343,12 +496,12 @@ def discover_data_yaml(development_root: Path, explicit: Optional[str]) -> Path:
 
 
 def discover_coco_json(development_root: Path, split: str, explicit: Optional[str]) -> Path:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(p)
-        return p
+        if p.exists():
+            return p.resolve()
+        print(f"WARNING: COCO {split} path not found: {p}. Falling back to automatic discovery.")
     names = (
         ["instances_train.json", "train.json", "instances_train2017.json"]
         if split == "train"
@@ -1227,147 +1380,388 @@ def make_base_parser(description: str) -> argparse.ArgumentParser:
 
 
 
-MODEL_NAME = "YOLO26s"
-MODEL_SLUG = "yolo26s"
-MODEL_ROLE = "Product-oriented real-time baseline selected in Step 1"
-PRETRAINED_DEFAULT = "yolo26s.pt"
-REFERENCE_URL = "https://docs.ultralytics.com/models/yolo26/"
+MODEL_NAME = "RT-DETR-R18"
+MODEL_SLUG = "rtdetr_r18"
+MODEL_ROLE = "Independent Transformer / end-to-end baseline selected in Step 1"
+PRETRAINED_DEFAULT = "PekingU/rtdetr_r18vd"
+REFERENCE_URL = "https://github.com/lyuwenyu/RT-DETR"
 
 
-def _mean_or_none(value: Any) -> Optional[float]:
+def plot_training_history(history: List[Dict[str, Any]], out_dir: Path) -> None:
+    if not history:
+        return
     try:
-        import numpy as np
-        arr = np.asarray(value, dtype=float)
-        return float(arr.mean()) if arr.size else None
+        import matplotlib.pyplot as plt
     except Exception:
-        try:
-            return float(value)
-        except Exception:
-            return None
+        return
+    ensure_dir(out_dir)
+    epochs = [int(r["epoch"]) for r in history]
+
+    fig = plt.figure(figsize=(8, 5))
+    plt.plot(epochs, [float(r["train_loss"]) for r in history], marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Training loss")
+    plt.title("RT-DETR-R18 training loss")
+    plt.grid(True, alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(out_dir / "training_loss.png", dpi=180)
+    plt.close(fig)
+
+    if any(r.get("map50_95") is not None for r in history):
+        fig = plt.figure(figsize=(8, 5))
+        plt.plot(epochs, [float(r.get("map50_95") or 0.0) for r in history], marker="o", label="mAP50-95")
+        plt.plot(epochs, [float(r.get("ap50") or 0.0) for r in history], marker="o", label="AP50")
+        plt.xlabel("Epoch")
+        plt.ylabel("Metric")
+        plt.title("RT-DETR-R18 internal-validation metrics")
+        plt.legend()
+        plt.grid(True, alpha=0.2)
+        fig.tight_layout()
+        fig.savefig(out_dir / "validation_metrics.png", dpi=180)
+        plt.close(fig)
 
 
-def export_ultralytics_predictions_to_coco(
+def save_history_csv(history: List[Dict[str, Any]], path: Path) -> None:
+    if not history:
+        return
+    ensure_dir(path.parent)
+    keys = sorted(set().union(*(r.keys() for r in history)))
+    with path.open("w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(history)
+
+
+def load_history_csv(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as f:
+        return [dict(row) for row in csv.DictReader(f)]
+
+
+def make_rtdetr_dataset_class():
+    import numpy as np
+    import torch
+    from PIL import Image
+    from torch.utils.data import Dataset
+
+    class RTDetrCocoDataset(Dataset):
+        def __init__(
+            self,
+            coco_json: Path,
+            image_paths: Mapping[int, Path],
+            processor: Any,
+            train: bool,
+            augment: bool,
+            seed: int,
+        ):
+            self.coco = load_coco_json(coco_json)
+            self.pid = person_category_id(self.coco)
+            self.images = sorted(self.coco["images"], key=lambda x: int(x["id"]))
+            self.image_paths = dict(image_paths)
+            self.processor = processor
+            self.train = train
+            self.augment_enabled = bool(augment)
+            self.seed = seed
+            self.anns_by_image: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+            for ann in self.coco["annotations"]:
+                if int(ann["category_id"]) == self.pid:
+                    self.anns_by_image[int(ann["image_id"])].append(dict(ann))
+
+            self.albu = None
+            if train and augment:
+                try:
+                    import albumentations as A
+                    self.albu = A.Compose(
+                        [
+                            A.HorizontalFlip(p=0.50),
+                            A.RandomBrightnessContrast(
+                                brightness_limit=0.15, contrast_limit=0.15, p=0.30
+                            ),
+                            A.HueSaturationValue(
+                                hue_shift_limit=6, sat_shift_limit=18, val_shift_limit=15, p=0.20
+                            ),
+                            A.Affine(
+                                scale=(0.90, 1.10),
+                                translate_percent=(-0.05, 0.05),
+                                rotate=(-5.0, 5.0),
+                                shear=(-1.0, 1.0),
+                                p=0.35,
+                            ),
+                        ],
+                        bbox_params=A.BboxParams(
+                            format="coco",
+                            label_fields=["category_ids"],
+                            min_visibility=0.20,
+                            clip=True,
+                        ),
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Albumentations is required for the RT-DETR training augmentation pipeline."
+                    ) from exc
+
+        def set_augmentation(self, enabled: bool) -> None:
+            self.augment_enabled = bool(enabled)
+
+        def __len__(self) -> int:
+            return len(self.images)
+
+        def __getitem__(self, index: int) -> Dict[str, Any]:
+            im_info = self.images[index]
+            iid = int(im_info["id"])
+            path = self.image_paths[iid]
+            image = Image.open(path).convert("RGB")
+            anns = [dict(a) for a in self.anns_by_image.get(iid, [])]
+
+            if self.train and self.augment_enabled and self.albu is not None:
+                arr = np.asarray(image)
+                bboxes = [list(map(float, a["bbox"])) for a in anns]
+                category_ids = [0 for _ in anns]  # model label is always 0=person
+                transformed = self.albu(image=arr, bboxes=bboxes, category_ids=category_ids)
+                image = Image.fromarray(transformed["image"])
+                new_anns = []
+                for bbox in transformed["bboxes"]:
+                    x, y, w, h = map(float, bbox)
+                    if w <= 0 or h <= 0:
+                        continue
+                    new_anns.append(
+                        {
+                            "bbox": [x, y, w, h],
+                            "category_id": 0,
+                            "area": w * h,
+                            "iscrowd": 0,
+                        }
+                    )
+                anns_model = new_anns
+            else:
+                anns_model = []
+                for a in anns:
+                    x, y, w, h = map(float, a["bbox"])
+                    anns_model.append(
+                        {
+                            "bbox": [x, y, w, h],
+                            "category_id": 0,
+                            "area": float(a.get("area", w * h)),
+                            "iscrowd": int(a.get("iscrowd", 0)),
+                        }
+                    )
+
+            target = {
+                "image_id": iid,
+                "annotations": anns_model,
+            }
+            encoded = self.processor(images=image, annotations=target, return_tensors="pt")
+            sample = {
+                "pixel_values": encoded["pixel_values"].squeeze(0),
+                "labels": encoded["labels"][0],
+                "image_id": iid,
+            }
+            if "pixel_mask" in encoded:
+                sample["pixel_mask"] = encoded["pixel_mask"].squeeze(0)
+            return sample
+
+    return RTDetrCocoDataset
+
+
+def collate_rtdetr(batch: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    import torch
+    out: Dict[str, Any] = {
+        "pixel_values": torch.stack([b["pixel_values"] for b in batch]),
+        "labels": [b["labels"] for b in batch],
+        "image_ids": [int(b["image_id"]) for b in batch],
+    }
+    if "pixel_mask" in batch[0]:
+        out["pixel_mask"] = torch.stack([b["pixel_mask"] for b in batch])
+    return out
+
+
+def move_label_dicts(labels: Sequence[Mapping[str, Any]], device: Any) -> List[Dict[str, Any]]:
+    moved = []
+    for lab in labels:
+        moved.append(
+            {
+                k: (v.to(device) if hasattr(v, "to") else v)
+                for k, v in lab.items()
+            }
+        )
+    return moved
+
+
+@contextlib.contextmanager
+def autocast_context(enabled: bool):
+    """CUDA autocast without masking exceptions raised by the training step."""
+    import torch
+    if enabled and torch.cuda.is_available():
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            yield
+    else:
+        yield
+
+
+def predict_rtdetr_coco(
     model: Any,
+    processor: Any,
     coco_json: Path,
-    development_root: Path,
-    imgsz: int,
-    device: str,
-    max_det: int,
+    image_paths: Mapping[int, Path],
+    device: Any,
+    score_threshold: float,
     out_json: Path,
-) -> Tuple[List[Dict[str, Any]], Dict[int, Path]]:
+) -> List[Dict[str, Any]]:
+    import torch
+    from PIL import Image
+
     coco = load_coco_json(coco_json)
     pid = person_category_id(coco)
-    image_paths = resolve_coco_image_paths(coco, development_root, strict=True)
-    predictions: List[Dict[str, Any]] = []
+    preds: List[Dict[str, Any]] = []
+    model.eval()
 
-    ordered_images = sorted(coco["images"], key=lambda x: int(x["id"]))
-    for idx, im in enumerate(ordered_images, start=1):
-        iid = int(im["id"])
-        path = image_paths[iid]
-        results = model.predict(
-            source=str(path),
-            imgsz=imgsz,
-            device=device,
-            conf=0.001,
-            iou=0.70,
-            max_det=max_det,
-            verbose=False,
-            stream=False,
-        )
-        if not results:
-            continue
-        result = results[0]
-        boxes = getattr(result, "boxes", None)
-        if boxes is not None and len(boxes):
-            xyxy = boxes.xyxy.detach().cpu().numpy()
-            conf = boxes.conf.detach().cpu().numpy()
-            cls = boxes.cls.detach().cpu().numpy()
-            for b, s, c in zip(xyxy, conf, cls):
-                if int(round(float(c))) != 0:
+    with torch.inference_mode():
+        for idx, im_info in enumerate(sorted(coco["images"], key=lambda x: int(x["id"])), start=1):
+            iid = int(im_info["id"])
+            path = image_paths[iid]
+            image = Image.open(path).convert("RGB")
+            width, height = image.size
+            inputs = processor(images=image, return_tensors="pt")
+            model_inputs = {
+                k: v.to(device)
+                for k, v in inputs.items()
+                if hasattr(v, "to")
+            }
+            outputs = model(**model_inputs)
+            target_sizes = torch.tensor([[height, width]], device=device)
+            processed = processor.post_process_object_detection(
+                outputs, target_sizes=target_sizes, threshold=score_threshold
+            )[0]
+            boxes = processed["boxes"].detach().cpu().tolist()
+            scores = processed["scores"].detach().cpu().tolist()
+            labels = processed["labels"].detach().cpu().tolist()
+            for box, score, label in zip(boxes, scores, labels):
+                if int(label) != 0:
                     continue
-                predictions.append(
+                preds.append(
                     {
                         "image_id": iid,
                         "category_id": pid,
-                        "bbox": [float(x) for x in xyxy_to_xywh(b.tolist())],
-                        "score": float(s),
+                        "bbox": [float(x) for x in xyxy_to_xywh(box)],
+                        "score": float(score),
                     }
                 )
-        if idx % 100 == 0 or idx == len(ordered_images):
-            print(f"[COCO export] {idx}/{len(ordered_images)} internal-val images", flush=True)
+            if idx % 100 == 0 or idx == len(coco["images"]):
+                print(f"[RT-DETR eval] {idx}/{len(coco['images'])} internal-val images", flush=True)
 
-    write_json(out_json, predictions)
-    return predictions, image_paths
+    write_json(out_json, preds)
+    return preds
+
+
+def save_torch_checkpoint(
+    path: Path,
+    model: Any,
+    optimizer: Any,
+    scheduler: Any,
+    epoch: int,
+    best_metric: float,
+    args: argparse.Namespace,
+) -> None:
+    import torch
+    ensure_dir(path.parent)
+    payload = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict() if optimizer else None,
+        "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+        "epoch": epoch,
+        "best_metric": best_metric,
+        "cli_args": vars(args),
+        "saved_utc": utc_now(),
+    }
+    torch.save(payload, path)
+
+
+def load_torch_checkpoint(path: Path, model: Any, optimizer: Any = None, scheduler: Any = None) -> Dict[str, Any]:
+    import torch
+    ckpt = torch.load(path, map_location="cpu")
+    model.load_state_dict(ckpt["model_state_dict"])
+    if optimizer is not None and ckpt.get("optimizer_state_dict"):
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    if scheduler is not None and ckpt.get("scheduler_state_dict"):
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    return ckpt
 
 
 def main() -> None:
     parser = make_base_parser(
-        "Train the final Step-3 YOLO26s baseline with complete reproducibility and reporting artifacts."
+        "Train the final Step-3 RT-DETR-R18 baseline and archive all information required by the Step-3 report."
     )
-    parser.add_argument("--data-yaml", type=str, default=None)
-    parser.add_argument("--coco-val", type=str, default=None,
-                        help="COCO internal-validation JSON used only for standardized reporting.")
+    parser.add_argument("--coco-train", type=str, default=None)
+    parser.add_argument("--coco-val", type=str, default=None)
     parser.add_argument("--pretrained", type=str, default=PRETRAINED_DEFAULT)
-    parser.add_argument("--optimizer", type=str, default="auto",
-                        help="Ultralytics optimizer. 'auto' preserves the official fine-tuning behavior.")
-    parser.add_argument("--lr0", type=float, default=None,
-                        help="Optional explicit initial LR. Omit to let the selected optimizer recipe resolve it.")
-    parser.add_argument("--lrf", type=float, default=None)
-    parser.add_argument("--weight-decay", type=float, default=None)
-    parser.add_argument("--cos-lr", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--lr", type=float, default=1.0e-4)
+    parser.add_argument("--lr-backbone", type=float, default=1.0e-5)
+    parser.add_argument("--weight-decay", type=float, default=1.0e-4)
+    parser.add_argument("--warmup-epochs", type=float, default=1.0)
+    parser.add_argument("--grad-clip", type=float, default=0.1)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mosaic", type=float, default=0.50,
-                        help="Conservative project baseline; ablate separately rather than claiming global optimality.")
-    parser.add_argument("--mixup", type=float, default=0.00)
-    parser.add_argument("--copy-paste", type=float, default=0.00)
-    parser.add_argument("--close-mosaic", type=int, default=10)
-    parser.add_argument("--degrees", type=float, default=5.0)
-    parser.add_argument("--translate", type=float, default=0.08)
-    parser.add_argument("--scale", type=float, default=0.35)
-    parser.add_argument("--shear", type=float, default=0.0)
-    parser.add_argument("--perspective", type=float, default=0.0)
-    parser.add_argument("--fliplr", type=float, default=0.50)
-    parser.add_argument("--flipud", type=float, default=0.0)
-    parser.add_argument("--hsv-h", type=float, default=0.01)
-    parser.add_argument("--hsv-s", type=float, default=0.30)
-    parser.add_argument("--hsv-v", type=float, default=0.20)
-    parser.add_argument("--save-period", type=int, default=1, help="Save an Ultralytics checkpoint after every epoch to Google Drive.")
+    parser.add_argument("--augmentation", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--close-augmentation", type=int, default=10,
+                        help="Disable train augmentation for the last N fixed-budget epochs.")
     parser.add_argument("--resume", type=str, default="auto", help="auto = resume from this run's Drive last.pt when available; none = start fresh; or provide an explicit checkpoint path.")
+    parser.add_argument("--save-epoch-predictions", action=argparse.BooleanOptionalAction, default=False, help="Keep large per-epoch COCO prediction JSON files. Metrics are always saved; final predictions are always saved.")
     args = parser.parse_args()
 
     mount_google_drive_if_requested(args.mount_drive)
-    project_root = Path(args.project_root).expanduser().resolve() if args.project_root else discover_project_root()
+    project_root = resolve_project_root_arg(args.project_root)
     development_root = discover_development_root(project_root, args.development_root)
+    project_root = infer_project_root_from_development(development_root, project_root)
     manifest = discover_manifest(development_root, args.manifest)
-    data_yaml = discover_data_yaml(development_root, args.data_yaml)
+    coco_train = discover_coco_json(development_root, "train", args.coco_train)
     coco_val = discover_coco_json(development_root, "val", args.coco_val)
-    guard_not_final_test(development_root, manifest, data_yaml, coco_val)
+    guard_not_final_test(development_root, manifest, coco_train, coco_val)
     freeze = require_frozen_final_test(project_root, args.allow_missing_final_test_freeze)
 
     rows = load_manifest_rows(manifest)
     manifest_audit = audit_manifest(rows)
     assert_manifest_safe(manifest_audit, args.allow_missing_group_key)
 
+    train_coco_data = load_coco_json(coco_train)
+    val_coco_data = load_coco_json(coco_val)
+    train_summary = validate_person_only_coco(train_coco_data)
+    val_summary = validate_person_only_coco(val_coco_data)
+    train_image_paths_preflight = resolve_coco_image_paths(train_coco_data, development_root, strict=True)
+    val_image_paths_preflight = resolve_coco_image_paths(val_coco_data, development_root, strict=True)
+
     print_preflight_summary(MODEL_NAME, development_root, manifest, freeze, manifest_audit)
+    print("COCO train:", train_summary)
+    print("COCO val:", val_summary)
+    print("Resolved train images:", len(train_image_paths_preflight))
+    print("Resolved val images:", len(val_image_paths_preflight))
     if args.dry_run:
         print("Dry run complete. No training was started.")
         return
 
     ensure_dependencies([
         ("torch", "torch"),
-        ("ultralytics", "ultralytics>=8.4.114"),
+        ("torchvision", "torchvision"),
+        ("transformers", "transformers>=4.53.0,<5.0.0"),
+        ("albumentations", "albumentations"),
         ("pycocotools", "pycocotools"),
         ("PIL", "pillow"),
         ("numpy", "numpy"),
         ("matplotlib", "matplotlib"),
+        ("tqdm", "tqdm>=4.66.0"),
     ])
 
     import torch
-    from ultralytics import YOLO
+    from torch.utils.data import DataLoader
+    from tqdm.auto import tqdm
+    from transformers import RTDetrImageProcessor, RTDetrForObjectDetection, get_cosine_schedule_with_warmup
 
-    device = resolve_device(args.device)
-    gpu_audit = verify_l4_environment(device)
+    device_string = resolve_device(args.device)
+    if device_string == "cpu":
+        device = torch.device("cpu")
+    else:
+        device = torch.device(f"cuda:{int(device_string)}")
+    gpu_audit = verify_l4_environment(device_string)
     set_global_seed(args.seed, args.deterministic)
 
     output_root = (
@@ -1383,7 +1777,7 @@ def main() -> None:
     env["training_gpu_audit"] = gpu_audit
     write_json(sub["audit"] / "environment.json", env)
     dataset_snapshot = record_dataset_snapshot(
-        sub, development_root, manifest, [data_yaml, coco_val], freeze, manifest_audit
+        sub, development_root, manifest, [coco_train, coco_val], freeze, manifest_audit
     )
 
     protocol = {
@@ -1393,35 +1787,32 @@ def main() -> None:
         "imgsz": args.imgsz,
         "batch": args.batch,
         "seed": args.seed,
-        "device": device,
+        "device": str(device),
         "amp": args.amp,
-        "optimizer": args.optimizer,
-        "lr0": args.lr0,
-        "lrf": args.lrf,
+        "optimizer": "AdamW",
+        "lr": args.lr,
+        "lr_backbone": args.lr_backbone,
         "weight_decay": args.weight_decay,
-        "cos_lr": args.cos_lr,
+        "lr_schedule": "cosine with linear warmup",
+        "warmup_epochs": args.warmup_epochs,
+        "grad_clip": args.grad_clip,
         "augmentation": {
-            "mosaic": args.mosaic,
-            "mixup": args.mixup,
-            "copy_paste": args.copy_paste,
-            "close_mosaic": args.close_mosaic,
-            "degrees": args.degrees,
-            "translate": args.translate,
-            "scale": args.scale,
-            "shear": args.shear,
-            "perspective": args.perspective,
-            "fliplr": args.fliplr,
-            "flipud": args.flipud,
-            "hsv_h": args.hsv_h,
-            "hsv_s": args.hsv_s,
-            "hsv_v": args.hsv_v,
+            "enabled": args.augmentation,
+            "horizontal_flip_p": 0.50,
+            "brightness_contrast_p": 0.30,
+            "hsv_p": 0.20,
+            "affine_p": 0.35,
+            "affine_rotate_deg": [-5.0, 5.0],
+            "affine_scale": [0.90, 1.10],
+            "affine_translate_percent": [-0.05, 0.05],
+            "close_augmentation_last_epochs": args.close_augmentation,
+            "mosaic": False,
+            "mixup": False,
         },
         "fairness_note": (
-            "45 epochs / 1280 / fixed split / seed are project controls. "
-            "Augmentation values are conservative project baseline defaults and must be reported as such."
+            "The same Step-2 split, seed, 45-epoch budget, and 1280 project input are used for controlled comparison. "
+            "The optimizer/augmentation recipe is recorded explicitly and is not claimed to be a universal RT-DETR optimum."
         ),
-        "tiling": False,
-        "p2_modification": False,
         "final_test_used": False,
         "private_final_test_required_for_step3": False,
         "checkpoint_policy": "save every completed epoch to persistent Google Drive storage",
@@ -1436,182 +1827,260 @@ def main() -> None:
         "role": MODEL_ROLE,
         "pretrained": args.pretrained,
         "reference_url": REFERENCE_URL,
-        "architecture_modification": "none",
-        "p2_enabled": False,
-        "tiling_enabled": False,
+        "implementation": "Hugging Face Transformers RTDetrForObjectDetection using the converted official PekingU R18 checkpoint",
+        "architecture_modification": "classification head resized to one class (person); architecture otherwise RT-DETR-R18",
+        "input_resolution_note": (
+            "1280 is the project fixed-budget comparison resolution. The original public COCO checkpoint was trained/evaluated at its own reference resolution."
+        ),
     }
     write_json(sub["config"] / "model_metadata.json", model_meta)
 
-    resume_path = resolve_resume_checkpoint(run_root, args.resume, ultralytics_layout=True)
+    print("Loading processor/checkpoint:", args.pretrained)
+    processor = RTDetrImageProcessor.from_pretrained(
+        args.pretrained,
+        size={"height": args.imgsz, "width": args.imgsz},
+    )
+    model = RTDetrForObjectDetection.from_pretrained(
+        args.pretrained,
+        num_labels=1,
+        id2label={0: "person"},
+        label2id={"person": 0},
+        ignore_mismatched_sizes=True,
+    )
+    model.to(device)
+
+    train_paths = resolve_coco_image_paths(train_coco_data, development_root, strict=True)
+    val_paths = resolve_coco_image_paths(val_coco_data, development_root, strict=True)
+
+    DatasetClass = make_rtdetr_dataset_class()
+    train_ds = DatasetClass(
+        coco_train, train_paths, processor, train=True, augment=args.augmentation, seed=args.seed
+    )
+    val_ds = DatasetClass(
+        coco_val, val_paths, processor, train=False, augment=False, seed=args.seed
+    )
+
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch,
+        shuffle=True,
+        num_workers=args.workers,
+        pin_memory=torch.cuda.is_available(),
+        collate_fn=collate_rtdetr,
+        drop_last=False,
+        generator=generator,
+        persistent_workers=False,
+    )
+
+    backbone_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "backbone" in name:
+            backbone_params.append(param)
+        else:
+            other_params.append(param)
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": other_params, "lr": args.lr},
+            {"params": backbone_params, "lr": args.lr_backbone},
+        ],
+        weight_decay=args.weight_decay,
+    )
+    total_steps = max(1, args.epochs * len(train_loader))
+    warmup_steps = int(max(0.0, args.warmup_epochs) * len(train_loader))
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
+    )
+    try:
+        scaler = torch.amp.GradScaler("cuda", enabled=(args.amp and torch.cuda.is_available()))
+    except Exception:
+        scaler = torch.cuda.amp.GradScaler(enabled=(args.amp and torch.cuda.is_available()))
+
+    start_epoch = 1
+    best_metric = -1.0
+    history_path = sub["metrics"] / "training_history.csv"
+    history: List[Dict[str, Any]] = load_history_csv(history_path)
+    resume_path = resolve_resume_checkpoint(run_root, args.resume, ultralytics_layout=False)
     if resume_path is not None:
-        print(f"Resuming YOLO26s training from Google Drive checkpoint: {resume_path}")
-        model = YOLO(str(resume_path))
+        resume_state = load_torch_checkpoint(resume_path, model, optimizer, scheduler)
+        start_epoch = int(resume_state.get("epoch", 0)) + 1
+        best_metric = float(resume_state.get("best_metric", -1.0))
+        existing_best = sub["checkpoints"] / "best.pt"
+        if existing_best.exists():
+            try:
+                best_state_for_resume = torch.load(existing_best, map_location="cpu")
+                best_metric = max(best_metric, float(best_state_for_resume.get("best_metric", -1.0)))
+            except Exception:
+                pass
+        print(f"Resuming RT-DETR-R18 from Google Drive checkpoint: {resume_path}")
+        print("Next epoch:", start_epoch)
         append_jsonl(
             sub["audit"] / "resume_history.jsonl",
-            {"utc": utc_now(), "mode": "resume", "checkpoint": str(resume_path)},
+            {"utc": utc_now(), "mode": "resume", "checkpoint": str(resume_path), "next_epoch": start_epoch},
         )
     else:
-        print(f"Starting YOLO26s from pretrained checkpoint: {args.pretrained}")
-        model = YOLO(args.pretrained)
         append_jsonl(
             sub["audit"] / "resume_history.jsonl",
-            {"utc": utc_now(), "mode": "fresh", "checkpoint": args.pretrained},
+            {"utc": utc_now(), "mode": "fresh", "checkpoint": args.pretrained, "next_epoch": 1},
         )
-
-    train_kwargs: Dict[str, Any] = dict(
-        data=str(data_yaml),
-        epochs=args.epochs,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        workers=args.workers,
-        device=device,
-        seed=args.seed,
-        deterministic=args.deterministic,
-        single_cls=True,
-        amp=args.amp,
-        optimizer=args.optimizer,
-        cos_lr=args.cos_lr,
-        mosaic=args.mosaic,
-        mixup=args.mixup,
-        copy_paste=args.copy_paste,
-        close_mosaic=args.close_mosaic,
-        degrees=args.degrees,
-        translate=args.translate,
-        scale=args.scale,
-        shear=args.shear,
-        perspective=args.perspective,
-        fliplr=args.fliplr,
-        flipud=args.flipud,
-        hsv_h=args.hsv_h,
-        hsv_s=args.hsv_s,
-        hsv_v=args.hsv_v,
-        patience=max(args.epochs + 10, 1000),
-        save=True,
-        save_period=args.save_period,
-        plots=True,
-        cache=False,
-        rect=False,
-        multi_scale=False,
-        max_det=args.max_det,
-        project=str(run_root),
-        name="trainer",
-        exist_ok=True,
-        verbose=True,
-    )
-    if args.lr0 is not None:
-        train_kwargs["lr0"] = args.lr0
-    if args.lrf is not None:
-        train_kwargs["lrf"] = args.lrf
-    if args.weight_decay is not None:
-        train_kwargs["weight_decay"] = args.weight_decay
-    if resume_path is not None:
-        # Passing the explicit checkpoint path lets Ultralytics restore optimizer, scheduler,
-        # scaler, and epoch state from the interrupted run.
-        train_kwargs["resume"] = str(resume_path)
-
-    write_json(sub["config"] / "train_kwargs.json", train_kwargs)
 
     reset_peak_vram()
     train_start = time.perf_counter()
-    try:
-        model.train(**train_kwargs)
-    except Exception:
-        (sub["logs"] / "TRAINING_EXCEPTION.txt").write_text(traceback.format_exc(), encoding="utf-8")
-        raise
+    best_path = sub["checkpoints"] / "best.pt"
+    last_path = sub["checkpoints"] / "last.pt"
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        if args.augmentation and args.close_augmentation > 0:
+            train_ds.set_augmentation(epoch <= args.epochs - args.close_augmentation)
+        model.train()
+        epoch_loss = 0.0
+        seen_batches = 0
+        epoch_start = time.perf_counter()
+
+        progress = tqdm(
+            train_loader,
+            total=len(train_loader),
+            desc=f"RT-DETR-R18 Epoch {epoch}/{args.epochs}",
+            dynamic_ncols=True,
+            leave=True,
+        )
+        for step, batch in enumerate(progress, start=1):
+            pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+            labels = move_label_dicts(batch["labels"], device)
+            kwargs: Dict[str, Any] = {"pixel_values": pixel_values, "labels": labels}
+            if "pixel_mask" in batch:
+                kwargs["pixel_mask"] = batch["pixel_mask"].to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+            with autocast_context(args.amp):
+                outputs = model(**kwargs)
+                loss = outputs.loss
+
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                optimizer.step()
+            scheduler.step()
+
+            epoch_loss += float(loss.detach().cpu())
+            seen_batches += 1
+            progress.set_postfix(
+                loss=f"{epoch_loss / max(seen_batches, 1):.5f}",
+                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+            )
+
+        # Persist both last.pt and a unique epoch checkpoint directly in Google Drive.
+        # This guarantees that training can be resumed after any completed epoch.
+        epoch_checkpoint = sub["checkpoints"] / "epochs" / f"epoch_{epoch:03d}.pt"
+        save_torch_checkpoint(last_path, model, optimizer, scheduler, epoch, best_metric, args)
+        save_torch_checkpoint(epoch_checkpoint, model, optimizer, scheduler, epoch, best_metric, args)
+
+        # Full internal-validation AP every epoch. This is intentionally the INTERNAL val set only.
+        if args.save_epoch_predictions:
+            epoch_pred_json = sub["predictions"] / f"epoch_{epoch:03d}.json"
+        else:
+            epoch_pred_json = ensure_dir(Path("/content/step3_epoch_eval") / MODEL_SLUG / run_id) / f"epoch_{epoch:03d}.json"
+        preds = predict_rtdetr_coco(
+            model, processor, coco_val, val_paths, device, 0.001, epoch_pred_json
+        )
+        eval_metrics = coco_eval_metrics(coco_val, epoch_pred_json, max_dets=args.max_det)
+        map_metric = float(eval_metrics.get("ap50_95") or 0.0)
+
+        if map_metric > best_metric:
+            best_metric = map_metric
+            save_torch_checkpoint(best_path, model, optimizer, scheduler, epoch, best_metric, args)
+
+        # Re-save the resumable checkpoints after validation so best_metric and
+        # scheduler metadata are synchronized with the completed epoch.
+        save_torch_checkpoint(last_path, model, optimizer, scheduler, epoch, best_metric, args)
+        save_torch_checkpoint(epoch_checkpoint, model, optimizer, scheduler, epoch, best_metric, args)
+
+        if not args.save_epoch_predictions:
+            with contextlib.suppress(Exception):
+                epoch_pred_json.unlink()
+
+        row = {
+            "epoch": epoch,
+            "train_loss": epoch_loss / max(seen_batches, 1),
+            "map50_95": eval_metrics.get("ap50_95"),
+            "ap50": eval_metrics.get("ap50"),
+            "ar50_95": eval_metrics.get("ar50_95"),
+            "lr_main": optimizer.param_groups[0]["lr"],
+            "lr_backbone": optimizer.param_groups[1]["lr"],
+            "augmentation_enabled": train_ds.augment_enabled,
+            "epoch_seconds": time.perf_counter() - epoch_start,
+            "peak_vram_mb_so_far": peak_vram_mb(),
+        }
+        history.append(row)
+        save_history_csv(history, history_path)
+        plot_training_history(history, sub["curves"])
+        write_json(sub["metrics"] / f"epoch_{epoch:03d}_coco_metrics.json", eval_metrics)
+        print(
+            f"Epoch {epoch} complete | loss={row['train_loss']:.5f} | "
+            f"mAP50-95={map_metric:.5f} | AP50={float(eval_metrics.get('ap50') or 0.0):.5f}",
+            flush=True,
+        )
+
     cuda_sync()
     training_seconds = time.perf_counter() - train_start
     peak_mb = peak_vram_mb()
 
-    trainer = getattr(model, "trainer", None)
-    trainer_save_dir = Path(getattr(trainer, "save_dir", run_root / "trainer"))
-    best_path = Path(getattr(trainer, "best", trainer_save_dir / "weights" / "best.pt"))
-    last_path = Path(getattr(trainer, "last", trainer_save_dir / "weights" / "last.pt"))
-    best_copy = safe_copy(best_path, sub["checkpoints"] / "best.pt") or best_path
-    last_copy = safe_copy(last_path, sub["checkpoints"] / "last.pt") or last_path
+    if not best_path.exists():
+        shutil.copy2(last_path, best_path)
+    best_state = load_torch_checkpoint(best_path, model)
+    best_epoch = int(best_state.get("epoch", args.epochs))
+    best_metric = float(best_state.get("best_metric", best_metric))
+    model.to(device)
+    model.eval()
 
-    for candidate in [
-        "results.csv", "results.png", "PR_curve.png", "F1_curve.png", "P_curve.png",
-        "R_curve.png", "confusion_matrix.png", "confusion_matrix_normalized.png",
-        "labels.jpg", "labels_correlogram.jpg", "args.yaml",
-    ]:
-        src = trainer_save_dir / candidate
-        if src.exists():
-            target_dir = sub["metrics"] if src.suffix == ".csv" else sub["curves"]
-            safe_copy(src, target_dir / src.name)
-
-    eval_model = YOLO(str(best_copy))
-    val_result = eval_model.val(
-        data=str(data_yaml),
-        split="val",
-        imgsz=args.imgsz,
-        batch=args.batch,
-        workers=args.workers,
-        device=device,
-        single_cls=True,
-        conf=0.001,
-        iou=0.70,
-        max_det=args.max_det,
-        plots=True,
-        save_json=True,
-        project=str(run_root),
-        name="final_internal_val",
-        exist_ok=True,
-        verbose=True,
-    )
+    # Save standard HF-format best model/processor for future reproducible use.
+    hf_best_dir = sub["checkpoints"] / "best_hf"
+    ensure_dir(hf_best_dir)
+    model.save_pretrained(hf_best_dir)
+    processor.save_pretrained(hf_best_dir)
 
     pred_json = sub["predictions"] / "internal_val_predictions.coco.json"
-    predictions, image_paths = export_ultralytics_predictions_to_coco(
-        eval_model, coco_val, development_root, args.imgsz, device, args.max_det, pred_json
+    predictions = predict_rtdetr_coco(
+        model, processor, coco_val, val_paths, device, 0.001, pred_json
     )
-    coco_data = load_coco_json(coco_val)
-    validate_person_only_coco(coco_data)
     standardized = coco_eval_metrics(coco_val, pred_json, max_dets=args.max_det)
     operating = threshold_operating_metrics(
-        coco_data, predictions, args.operating_conf, args.operating_iou
+        val_coco_data, predictions, args.operating_conf, args.operating_iou
     )
     write_json(sub["metrics"] / "standardized_coco_metrics.json", standardized)
     write_json(sub["metrics"] / "operating_point_metrics.json", operating)
     save_operating_metrics_csv(sub["metrics"] / "failure_ranking.csv", operating)
     save_failure_visuals(
-        coco_data, predictions, image_paths, operating, sub["failures"],
+        val_coco_data, predictions, val_paths, operating, sub["failures"],
         limit=args.failure_visuals, score_threshold=args.operating_conf
     )
 
-    best_epoch = None
-    native_results_csv = sub["metrics"] / "results.csv"
-    if native_results_csv.exists():
-        try:
-            import pandas as pd
-            df = pd.read_csv(native_results_csv)
-            metric_cols = [
-                c for c in df.columns
-                if "metrics/mAP50-95" in c or "metrics/mAP50-95(B)" in c or "map50-95" in c.lower()
-            ]
-            if metric_cols:
-                best_idx = int(df[metric_cols[0]].astype(float).idxmax())
-                epoch_col = next((c for c in df.columns if c.strip().lower() == "epoch"), None)
-                best_epoch = int(df.loc[best_idx, epoch_col]) if epoch_col else best_idx
-        except Exception:
-            pass
+    from PIL import Image
+    first_iid = int(val_coco_data["images"][0]["id"])
+    latency_image = val_paths[first_iid]
+    latency_pil = Image.open(latency_image).convert("RGB")
 
-    first_iid = int(coco_data["images"][0]["id"])
-    latency_image = image_paths[first_iid]
+    def latency_call():
+        inputs = processor(images=latency_pil, return_tensors="pt")
+        kwargs = {k: v.to(device) for k, v in inputs.items() if hasattr(v, "to")}
+        with torch.inference_mode():
+            outputs = model(**kwargs)
+            target_sizes = torch.tensor([[latency_pil.height, latency_pil.width]], device=device)
+            processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.25)
+
     latency = benchmark_latencies(
-        lambda: eval_model.predict(
-            source=str(latency_image), imgsz=args.imgsz, device=device,
-            conf=0.25, iou=0.70, max_det=args.max_det, verbose=False
-        ),
-        warmup=args.latency_warmup,
-        iterations=args.latency_iters,
+        latency_call, warmup=args.latency_warmup, iterations=args.latency_iters
     )
-
-    native_box = getattr(val_result, "box", None)
-    native_metrics = {
-        "map50_95": _mean_or_none(getattr(native_box, "map", None)) if native_box is not None else None,
-        "ap50": _mean_or_none(getattr(native_box, "map50", None)) if native_box is not None else None,
-        "precision": _mean_or_none(getattr(native_box, "mp", None)) if native_box is not None else None,
-        "recall": _mean_or_none(getattr(native_box, "mr", None)) if native_box is not None else None,
-    }
 
     metrics = {
         "primary_source": "standardized COCO internal-validation evaluation",
@@ -1629,13 +2098,12 @@ def main() -> None:
             }
             for k in SIZE_BUCKETS
         },
-        "ultralytics_native_metrics": native_metrics,
         "operating_conf": args.operating_conf,
         "operating_iou": args.operating_iou,
     }
 
-    best_rec = checkpoint_record(Path(best_copy))
-    last_rec = checkpoint_record(Path(last_copy))
+    best_rec = checkpoint_record(best_path)
+    last_rec = checkpoint_record(last_path)
     report = {
         "schema_version": "step3-run-report-v1",
         "run_id": run_id,
@@ -1648,8 +2116,9 @@ def main() -> None:
         "training": {
             "best_epoch": best_epoch,
             "selection_metric": "internal validation mAP50-95",
+            "best_metric": best_metric,
             "fixed_budget_completed": True,
-            "trainer_save_dir": str(trainer_save_dir),
+            "history_csv": str(sub["metrics"] / "training_history.csv"),
         },
         "metrics": metrics,
         "runtime": {
@@ -1657,26 +2126,29 @@ def main() -> None:
             "training_hours": training_seconds / 3600.0,
             "peak_vram_mb": peak_mb,
             **latency,
-            "latency_scope": "single-image API call: preprocess + inference + postprocess; no video decode/render",
+            "latency_scope": "processor resize/normalize + PyTorch model + RT-DETR postprocess; no video decode/render",
             "latency_image": str(latency_image),
         },
         "complexity": {
-            "parameters": count_parameters(getattr(eval_model, "model", eval_model)),
-            "flops": "Use Ultralytics model.info()/profile output archived in logs; value depends on input size.",
+            "parameters": count_parameters(model),
+            "flops": None,
+            "flops_note": "Run the official RT-DETR profiling tool separately if a framework-native FLOP number is required.",
         },
         "artifacts": {
             "best_checkpoint": best_rec,
             "last_checkpoint": last_rec,
             "best_checkpoint_sha256": best_rec.get("sha256"),
             "last_checkpoint_sha256": last_rec.get("sha256"),
+            "best_hf_directory": str(hf_best_dir),
             "predictions_json": str(pred_json),
             "standardized_metrics_json": str(sub["metrics"] / "standardized_coco_metrics.json"),
             "failure_ranking_csv": str(sub["metrics"] / "failure_ranking.csv"),
         },
         "scientific_notes": [
-            "YOLO26s is trained without P2 or tiling in the primary baseline, as fixed in Step 1.",
-            "The private Final Test is not read in Step 3.",
-            "Final deployment TensorRT benchmarking belongs to Step 4, not this training script.",
+            "RT-DETR-R18 is kept as an independent Transformer/end-to-end baseline, not as a YOLO variant.",
+            "The project fixed-budget input is 1280; this must not be confused with the checkpoint's reference COCO protocol.",
+            "The frozen private Final Test is not read in Step 3.",
+            "TensorRT deployment benchmarking belongs to Step 4.",
         ],
     }
     write_json(run_root / "STEP3_RUN_REPORT.json", report)
@@ -1684,12 +2156,13 @@ def main() -> None:
 
     print("\nTraining complete.")
     print("Run directory:", run_root)
+    print("Best epoch:", best_epoch)
     print("Primary internal-val mAP50-95:", metrics["map50_95"])
     print("Primary internal-val AP50:", metrics["ap50"])
     print("Internal-val Recall@operating-point:", metrics["recall"])
     print("Peak VRAM MB:", peak_mb)
     print("Warm median latency ms:", latency.get("warm_latency_median_ms"))
-    print("Best checkpoint:", best_copy)
+    print("Best checkpoint:", best_path)
     print("Private Final Test content accessed: NO (presence is optional in Step 3)")
 
 

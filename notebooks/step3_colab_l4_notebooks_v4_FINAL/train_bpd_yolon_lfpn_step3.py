@@ -200,49 +200,173 @@ def guard_not_final_test(*paths: Optional[Path]) -> None:
             )
 
 
+AUTO_PATH_SENTINELS = {
+    "", "auto", "none", "null", "detect", "discover", "automatic",
+}
+
+PLACEHOLDER_PATH_TOKENS = (
+    "/path/to/",
+    "\\path\\to\\",
+    "path/to/your",
+    "your_project",
+    "your/project",
+    "03_development_directory",
+    "<project",
+    "<path",
+    "{project",
+    "{path",
+)
+
+
+def is_auto_or_placeholder_path(value: Optional[str]) -> bool:
+    if value is None:
+        return True
+    raw = str(value).strip()
+    low = raw.lower().replace("\\", "/")
+    if low in AUTO_PATH_SENTINELS:
+        return True
+    return any(token.replace("\\", "/") in low for token in PLACEHOLDER_PATH_TOKENS)
+
+
+def _bounded_named_dirs(root: Path, target_name: str, max_depth: int = 7) -> List[Path]:
+    """Find directories with a specific name without unbounded Google Drive recursion."""
+    root = Path(root)
+    if not root.exists() or not root.is_dir():
+        return []
+    hits: List[Path] = []
+    base_depth = len(root.parts)
+    skip_names = {
+        ".git", ".ipynb_checkpoints", "__pycache__", "node_modules",
+        "90_final_test_v1", "runs", "step3", "outputs",
+    }
+    for current, dirs, _files in os.walk(root):
+        current_path = Path(current)
+        depth = len(current_path.parts) - base_depth
+        if depth >= max_depth:
+            dirs[:] = []
+            continue
+        dirs[:] = [
+            d for d in dirs
+            if d not in skip_names and not d.startswith(".Trash")
+        ]
+        for d in list(dirs):
+            if d == target_name:
+                candidate = (current_path / d).resolve()
+                low = str(candidate).replace("\\", "/").lower()
+                if not any(token in low for token in FORBIDDEN_TEST_TOKENS):
+                    hits.append(candidate)
+                # No need to walk inside Development while locating it.
+                with contextlib.suppress(ValueError):
+                    dirs.remove(d)
+    return hits
+
+
+def _development_candidate_score(path: Path) -> int:
+    """Score a Step-2 Development candidate by the artifacts required by Step 3."""
+    path = Path(path)
+    score = 0
+    if path.name == "03_development":
+        score += 20
+    for p in [
+        path / "train" / "images",
+        path / "val" / "images",
+        path / "images" / "train",
+        path / "images" / "val",
+    ]:
+        if p.exists():
+            score += 4
+    parent = path.parent
+    checks = [
+        ("data.yaml", 8),
+        ("dataset.yaml", 6),
+        ("instances_train.json", 8),
+        ("instances_val.json", 8),
+        ("dataset_manifest.csv", 6),
+        ("development_manifest.csv", 5),
+        ("manifest.csv", 3),
+    ]
+    for name, points in checks:
+        if (parent / name).exists() or any(parent.glob(f"*/{name}")):
+            score += points
+    return score
+
+
+def _project_root_from_development(development_root: Path) -> Path:
+    """Infer the Step-2 project root from the canonical Step-2 directory layout."""
+    dev = Path(development_root).resolve()
+    # Expected: <project>/workspace/aerial-person-data/03_development
+    if dev.parent.name == "aerial-person-data" and dev.parent.parent.name == "workspace":
+        return dev.parent.parent.parent.resolve()
+    # Alternate: <project>/aerial-person-data/03_development
+    if dev.parent.name == "aerial-person-data":
+        return dev.parent.parent.resolve()
+    return dev.parent.resolve()
+
+
+def resolve_project_root_arg(explicit: Optional[str]) -> Path:
+    """Use a valid explicit project root, otherwise auto-discover it safely."""
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
+        if p.exists():
+            return p.resolve()
+        print(
+            f"WARNING: The configured project root does not exist: {p}. "
+            "Falling back to automatic Google Drive discovery."
+        )
+    return discover_project_root()
+
+
 def discover_project_root(start: Optional[Path] = None) -> Path:
     start = (start or Path.cwd()).resolve()
 
-    # Colab-first locations. These checks are intentionally shallow so that the
-    # script does not recursively scan the user's entire Google Drive.
-    colab_candidates = [
+    standard_candidates = [
         Path("/content/drive/MyDrive/aerial_person_project"),
         Path("/content/drive/MyDrive/aerial_person_final_product"),
         Path("/content/drive/MyDrive/aerial-person-project"),
         Path("/content/drive/MyDrive/aerial-person-step2-pipeline"),
         Path("/content/drive/MyDrive/step2"),
     ]
-    mydrive = Path("/content/drive/MyDrive")
-    if mydrive.exists():
-        try:
-            colab_candidates.extend([p for p in mydrive.iterdir() if p.is_dir()])
-        except Exception:
-            pass
-    for p in colab_candidates:
+    for p in standard_candidates:
         if p.exists() and (
             (p / "workspace" / "aerial-person-data" / "03_development").exists()
             or (p / "aerial-person-data" / "03_development").exists()
             or (p / "03_development").exists()
-            or (p / "workspace").exists()
-            or (p / ".git").exists()
         ):
             return p.resolve()
 
-    candidates = [start] + list(start.parents)
-    markers = ("aerial-person-step2-pipeline", "workspace", ".git")
-    for p in candidates:
-        if any((p / m).exists() for m in markers):
-            return p
+    # First inspect the working directory and its parents.
+    for p in [start, *start.parents]:
+        if (
+            (p / "workspace" / "aerial-person-data" / "03_development").exists()
+            or (p / "aerial-person-data" / "03_development").exists()
+            or (p / "03_development").exists()
+        ):
+            return p.resolve()
+
+    # Bounded MyDrive search is the final Colab fallback.
+    mydrive = Path("/content/drive/MyDrive")
+    hits = _bounded_named_dirs(mydrive, "03_development", max_depth=7) if mydrive.exists() else []
+    if hits:
+        hits.sort(key=lambda p: (-_development_candidate_score(p), len(p.parts), str(p)))
+        selected = hits[0]
+        print(f"Auto-discovered Step-2 Development Pool: {selected}")
+        return _project_root_from_development(selected)
+
     return start
 
 
 def discover_development_root(project_root: Path, explicit: Optional[str]) -> Path:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    # A placeholder or a stale explicit path is NOT fatal. The code falls back to
+    # automatic discovery, which directly fixes common Colab path-copy mistakes.
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(f"Development root not found: {p}")
-        return p
+        if p.exists() and p.is_dir():
+            return p.resolve()
+        print(
+            f"WARNING: The configured Development root does not exist: {p}. "
+            "Falling back to automatic discovery."
+        )
 
     candidates = [
         project_root / "workspace" / "aerial-person-data" / "03_development",
@@ -251,21 +375,50 @@ def discover_development_root(project_root: Path, explicit: Optional[str]) -> Pa
         Path("/content/drive/MyDrive/aerial_person_project/workspace/aerial-person-data/03_development"),
         Path("/content/drive/MyDrive/aerial_person_project/aerial-person-data/03_development"),
         Path("/content/drive/MyDrive/aerial_person_project/03_development"),
+        Path("/content/drive/MyDrive/aerial-person-step2-pipeline/workspace/aerial-person-data/03_development"),
     ]
+    valid = []
     for c in candidates:
-        if c.exists():
+        if c.exists() and c.is_dir():
             guard_not_final_test(c)
-            return c.resolve()
+            valid.append(c.resolve())
 
-    # Controlled fallback: search only for directory name.
-    hits = [p for p in project_root.rglob("03_development") if p.is_dir()]
-    hits = [p for p in hits if not any(t in str(p).lower() for t in FORBIDDEN_TEST_TOKENS)]
-    if hits:
-        return hits[0].resolve()
+    if not valid:
+        valid.extend(_bounded_named_dirs(project_root, "03_development", max_depth=7))
+
+    mydrive = Path("/content/drive/MyDrive")
+    if not valid and mydrive.exists():
+        valid.extend(_bounded_named_dirs(mydrive, "03_development", max_depth=7))
+
+    # De-duplicate while preserving deterministic ordering.
+    unique: Dict[str, Path] = {}
+    for p in valid:
+        unique[str(p.resolve())] = p.resolve()
+    valid = list(unique.values())
+
+    if valid:
+        valid.sort(key=lambda p: (-_development_candidate_score(p), len(p.parts), str(p)))
+        selected = valid[0]
+        print(f"Using Step-2 Development Pool: {selected}")
+        if len(valid) > 1:
+            print("Other detected Development candidates:")
+            for other in valid[1:5]:
+                print(f"  - {other} (score={_development_candidate_score(other)})")
+        return selected
+
     raise FileNotFoundError(
-        "Could not locate the Step-2 Development Pool. Pass --development-root explicitly."
+        "Could not locate the Step-2 Development Pool. Expected a directory named "
+        "'03_development', normally at "
+        "<project>/workspace/aerial-person-data/03_development. "
+        "The private Final Test is not required for Step 3."
     )
 
+
+def infer_project_root_from_development(development_root: Path, current_project_root: Path) -> Path:
+    inferred = _project_root_from_development(development_root)
+    if inferred.exists():
+        return inferred
+    return current_project_root
 
 def discover_final_test_freeze(project_root: Path) -> Optional[Path]:
     candidates = [
@@ -316,12 +469,12 @@ def find_file(root: Path, names: Sequence[str]) -> Optional[Path]:
 
 
 def discover_manifest(development_root: Path, explicit: Optional[str]) -> Optional[Path]:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(p)
-        return p
+        if p.exists():
+            return p.resolve()
+        print(f"WARNING: Manifest path not found: {p}. Falling back to automatic discovery.")
     return find_file(
         development_root.parent,
         ["dataset_manifest.csv", "development_manifest.csv", "manifest.csv"],
@@ -329,12 +482,12 @@ def discover_manifest(development_root: Path, explicit: Optional[str]) -> Option
 
 
 def discover_data_yaml(development_root: Path, explicit: Optional[str]) -> Path:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(p)
-        return p
+        if p.exists():
+            return p.resolve()
+        print(f"WARNING: data.yaml path not found: {p}. Falling back to automatic discovery.")
     hit = find_file(development_root.parent, ["data.yaml", "dataset.yaml"])
     if not hit:
         raise FileNotFoundError("YOLO data.yaml not found. Pass --data-yaml explicitly.")
@@ -343,12 +496,12 @@ def discover_data_yaml(development_root: Path, explicit: Optional[str]) -> Path:
 
 
 def discover_coco_json(development_root: Path, split: str, explicit: Optional[str]) -> Path:
-    if explicit:
-        p = Path(explicit).expanduser().resolve()
+    if not is_auto_or_placeholder_path(explicit):
+        p = Path(str(explicit)).expanduser()
         guard_not_final_test(p)
-        if not p.exists():
-            raise FileNotFoundError(p)
-        return p
+        if p.exists():
+            return p.resolve()
+        print(f"WARNING: COCO {split} path not found: {p}. Falling back to automatic discovery.")
     names = (
         ["instances_train.json", "train.json", "instances_train2017.json"]
         if split == "train"
@@ -360,6 +513,137 @@ def discover_coco_json(development_root: Path, split: str, explicit: Optional[st
     guard_not_final_test(hit)
     return hit
 
+
+def discover_split_image_dir(development_root: Path, split: str) -> Optional[Path]:
+    """Locate the actual image directory for a Development split."""
+    split = normalize_split(split)
+    names = ["val", "valid", "validation"] if split == "val" else ["train", "training"]
+    candidates: List[Path] = []
+    for name in names:
+        candidates.extend([
+            development_root / name / "images",
+            development_root / "images" / name,
+            development_root / name,
+        ])
+    for p in candidates:
+        if p.exists() and p.is_dir():
+            # Prefer a directory that actually contains at least one supported image.
+            try:
+                if any(x.is_file() and x.suffix.lower() in IMAGE_EXTENSIONS for x in p.rglob("*")):
+                    return p.resolve()
+            except Exception:
+                pass
+    return None
+
+
+def write_runtime_yolo_data_yaml(
+    development_root: Path,
+    out_path: Path,
+    source_yaml: Optional[Path] = None,
+) -> Path:
+    """Write a Colab-safe YOLO YAML using discovered absolute POSIX paths.
+
+    This avoids failures when a Step-2 data.yaml was originally generated on Windows
+    and still contains drive-letter paths that are invalid inside Colab.
+    """
+    train_dir = discover_split_image_dir(development_root, "train")
+    val_dir = discover_split_image_dir(development_root, "val")
+    if train_dir is None or val_dir is None:
+        if source_yaml and Path(source_yaml).exists():
+            print(
+                "WARNING: Could not reconstruct train/val image directories from the canonical "
+                "03_development layout. The original data.yaml will be used unchanged."
+            )
+            return Path(source_yaml).resolve()
+        raise FileNotFoundError(
+            "Could not locate train/val image directories under the Step-2 Development Pool."
+        )
+
+    ensure_dir(out_path.parent)
+    content = (
+        f"train: {train_dir.as_posix()}\n"
+        f"val: {val_dir.as_posix()}\n"
+        "nc: 1\n"
+        "names:\n"
+        "  0: person\n"
+    )
+    out_path.write_text(content, encoding="utf-8")
+    print(f"Colab-safe runtime YOLO data YAML: {out_path}")
+    print(f"  train: {train_dir}")
+    print(f"  val:   {val_dir}")
+    return out_path.resolve()
+
+def audit_yolo_labels(development_root: Path) -> Dict[str, Any]:
+    """Validate YOLO label syntax and enforce class 0=person for train/internal-val."""
+    report: Dict[str, Any] = {"splits": {}, "errors": []}
+    for split in ("train", "val"):
+        label_candidates = [
+            development_root / split / "labels",
+            development_root / "labels" / split,
+        ]
+        label_dir = next((p for p in label_candidates if p.exists() and p.is_dir()), None)
+        image_dir = discover_split_image_dir(development_root, split)
+        image_count = 0
+        if image_dir is not None:
+            image_count = sum(
+                1 for p in image_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+            )
+        label_files = list(label_dir.rglob("*.txt")) if label_dir else []
+        box_count = 0
+        for label_path in label_files:
+            try:
+                lines = label_path.read_text(encoding="utf-8-sig").splitlines()
+            except Exception as exc:
+                report["errors"].append(f"Unreadable label file {label_path}: {exc}")
+                continue
+            for line_no, line in enumerate(lines, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) != 5:
+                    report["errors"].append(
+                        f"{label_path}:{line_no}: expected 5 YOLO fields, got {len(parts)}"
+                    )
+                    continue
+                try:
+                    cls = int(float(parts[0]))
+                    vals = [float(x) for x in parts[1:]]
+                except Exception:
+                    report["errors"].append(
+                        f"{label_path}:{line_no}: non-numeric YOLO label values"
+                    )
+                    continue
+                if cls != 0:
+                    report["errors"].append(
+                        f"{label_path}:{line_no}: class {cls} found; Step 3 requires class 0=person only"
+                    )
+                if not all(0.0 <= v <= 1.0 for v in vals):
+                    report["errors"].append(
+                        f"{label_path}:{line_no}: normalized coordinates must be in [0,1]"
+                    )
+                if vals[2] <= 0.0 or vals[3] <= 0.0:
+                    report["errors"].append(
+                        f"{label_path}:{line_no}: width/height must be positive"
+                    )
+                box_count += 1
+                if len(report["errors"]) >= 50:
+                    break
+            if len(report["errors"]) >= 50:
+                break
+        report["splits"][split] = {
+            "image_dir": str(image_dir) if image_dir else None,
+            "image_count": image_count,
+            "label_dir": str(label_dir) if label_dir else None,
+            "label_files": len(label_files),
+            "boxes": box_count,
+        }
+    if report["errors"]:
+        raise RuntimeError(
+            "YOLO label audit failed. First errors:\n- " + "\n- ".join(report["errors"][:20])
+        )
+    return report
 
 def load_manifest_rows(path: Optional[Path]) -> List[Dict[str, str]]:
     if not path or not path.exists():
@@ -1282,7 +1566,7 @@ head:
 
   # --- DAFF phase 1: C4 + up(C5) -> DSPF-like L1^4 --------------------------
   - [8, 1, Conv, [128, 1, 1]]       # 17
-  - [-1, 1, DySample, [2]]          # 18 up C5 P5->P4
+  - [-1, 1, DySample, [128, 2]]     # 18 up C5 P5->P4
   - [[6, 18], 1, Concat, [1]]       # 19
   - [-1, 1, Conv, [128, 1, 1]]      # 20 base
   - [-1, 1, Conv, [128, 3, 1, null, 128, 1]] # 21
@@ -1293,7 +1577,7 @@ head:
 
   # --- DAFF phase 2: up(L1^4) + L1^3 -> L2^3 -------------------------------
   - [25, 1, Conv, [64, 1, 1]]       # 26
-  - [-1, 1, DySample, [2]]          # 27
+  - [-1, 1, DySample, [64, 2]]      # 27
   - [[16, 27], 1, Concat, [1]]      # 28
   - [-1, 1, Conv, [64, 1, 1]]       # 29
   - [-1, 1, Conv, [64, 3, 1, null, 64, 1]]   # 30
@@ -1304,7 +1588,7 @@ head:
 
   # --- DEI/deep semantic injection: up(C5) + L2^3 -> L3^3 -------------------
   - [8, 1, Conv, [64, 1, 1]]        # 35
-  - [-1, 1, DySample, [4]]          # 36 P5->P3
+  - [-1, 1, DySample, [64, 4]]      # 36 P5->P3
   - [[34, 36], 1, Concat, [1]]      # 37
   - [-1, 1, Conv, [64, 1, 1]]       # 38
   - [-1, 1, Conv, [64, 3, 1, null, 64, 1]]   # 39
@@ -1315,13 +1599,13 @@ head:
 
   # --- Progressive high-resolution P2 fusion -------------------------------
   - [16, 1, Conv, [32, 1, 1]]       # 44
-  - [-1, 1, DySample, [2]]          # 45 L1^2
+  - [-1, 1, DySample, [32, 2]]      # 45 L1^2
   - [34, 1, Conv, [32, 1, 1]]       # 46
-  - [-1, 1, DySample, [2]]          # 47
+  - [-1, 1, DySample, [32, 2]]      # 47
   - [[45, 47, 2], 1, Concat, [1]]   # 48 + shallow C2
   - [-1, 1, C2f, [32, True]]        # 49 L2^2
   - [43, 1, Conv, [32, 1, 1]]       # 50
-  - [-1, 1, DySample, [2]]          # 51
+  - [-1, 1, DySample, [32, 2]]      # 51
   - [[45, 49, 51, 2], 1, Concat, [1]] # 52 dense P2 fusion
   - [-1, 2, C2f, [64, True]]        # 53 feature extraction
   - [-1, 1, Conv, [64, 3, 1]]       # 54 final P2 feature
@@ -1347,24 +1631,24 @@ try:
         DySample authors' source and must not be described as bit-for-bit author code.
         """
 
-        def __init__(self, scale: int = 2, max_offset: float = 0.25):
+        def __init__(self, channels: int, scale: int = 2, max_offset: float = 0.25):
             super().__init__()
+            self.channels = int(channels)
             self.scale = int(scale)
             self.max_offset = float(max_offset)
-            self.offset = nn.LazyConv2d(2, kernel_size=1, stride=1, padding=0)
-            self._zero_initialized = False
-
-        def _init_offset(self, x):
-            if not self._zero_initialized:
-                _ = self.offset(x)  # materialize LazyConv2d
-                with torch.no_grad():
-                    nn.init.zeros_(self.offset.weight)
-                    if self.offset.bias is not None:
-                        nn.init.zeros_(self.offset.bias)
-                self._zero_initialized = True
+            # A regular Conv2d is used instead of LazyConv2d because Ultralytics
+            # counts parameters while parsing the YAML, before the first forward pass.
+            self.offset = nn.Conv2d(self.channels, 2, kernel_size=1, stride=1, padding=0)
+            with torch.no_grad():
+                nn.init.zeros_(self.offset.weight)
+                if self.offset.bias is not None:
+                    nn.init.zeros_(self.offset.bias)
 
         def forward(self, x):
-            self._init_offset(x)
+            if x.shape[1] != self.channels:
+                raise RuntimeError(
+                    f"DySample expected {self.channels} channels but received {x.shape[1]}."
+                )
             b, c, h, w = x.shape
             oh, ow = h * self.scale, w * self.scale
 
@@ -1499,8 +1783,9 @@ def main() -> None:
         args.epochs = 300
 
     mount_google_drive_if_requested(args.mount_drive)
-    project_root = Path(args.project_root).expanduser().resolve() if args.project_root else discover_project_root()
+    project_root = resolve_project_root_arg(args.project_root)
     development_root = discover_development_root(project_root, args.development_root)
+    project_root = infer_project_root_from_development(development_root, project_root)
     manifest = discover_manifest(development_root, args.manifest)
     data_yaml = discover_data_yaml(development_root, args.data_yaml)
     coco_val = discover_coco_json(development_root, "val", args.coco_val)
@@ -1512,16 +1797,21 @@ def main() -> None:
     assert_manifest_safe(manifest_audit, args.allow_missing_group_key)
 
     coco_val_data = load_coco_json(coco_val)
-    validate_person_only_coco(coco_val_data)
+    coco_val_summary = validate_person_only_coco(coco_val_data)
+    val_image_paths = resolve_coco_image_paths(coco_val_data, development_root, strict=True)
+    yolo_label_audit = audit_yolo_labels(development_root)
 
     print_preflight_summary(MODEL_NAME, development_root, manifest, freeze, manifest_audit)
+    print("COCO internal-val:", coco_val_summary)
+    print("Resolved internal-val images:", len(val_image_paths))
+    print("YOLO label audit:", yolo_label_audit)
     if args.dry_run:
         print("Dry run complete. No training was started.")
         return
 
     ensure_dependencies([
         ("torch", "torch"),
-        ("ultralytics", "ultralytics>=8.4.114"),
+        ("ultralytics", "ultralytics==8.4.116"),
         ("pycocotools", "pycocotools"),
         ("PIL", "pillow"),
         ("numpy", "numpy"),
@@ -1550,6 +1840,11 @@ def main() -> None:
     write_json(sub["audit"] / "environment.json", env)
     dataset_snapshot = record_dataset_snapshot(
         sub, development_root, manifest, [data_yaml, coco_val], freeze, manifest_audit
+    )
+    runtime_data_yaml = write_runtime_yolo_data_yaml(
+        development_root,
+        sub["config"] / "runtime_data_colab.yaml",
+        source_yaml=data_yaml,
     )
 
     # Register the project DySample operator so Ultralytics YAML parsing can resolve it.
@@ -1620,6 +1915,7 @@ def main() -> None:
         "final_test_used": False,
         "private_final_test_required_for_step3": False,
         "checkpoint_policy": "save every completed epoch to persistent Google Drive storage",
+        "runtime_data_yaml": str(runtime_data_yaml),
         "default_colab_output_root": str(default_drive_output_root(project_root)),
         "requested_training_hardware": "Google Colab NVIDIA L4 GPU",
     }
@@ -1674,7 +1970,7 @@ def main() -> None:
         )
 
     train_kwargs: Dict[str, Any] = dict(
-        data=str(data_yaml),
+        data=str(runtime_data_yaml),
         epochs=args.epochs,
         imgsz=args.imgsz,
         batch=args.batch,
@@ -1715,7 +2011,8 @@ def main() -> None:
         verbose=True,
     )
     if resume_path is not None:
-        train_kwargs["resume"] = str(resume_path)
+        # Official Ultralytics resume flow: load last.pt first, then train(resume=True).
+        train_kwargs["resume"] = True
 
     write_json(sub["config"] / "train_kwargs.json", train_kwargs)
 

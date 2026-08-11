@@ -1,0 +1,9 @@
+# Keep the CUDA-enabled torch/torchvision provided by Google Colab.
+ultralytics==8.4.116
+transformers>=4.53.0,<5.0.0
+albumentations>=2.0.0,<3.0.0
+pycocotools>=2.0.7
+tqdm>=4.66.0
+pillow
+numpy
+matplotlib
