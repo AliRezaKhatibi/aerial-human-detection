@@ -1,0 +1,38 @@
+{
+  "package": "V5 STRICT FINAL",
+  "checks": [
+    {
+      "file": "train_rtdetr_r18_step3.py",
+      "source_compile": "PASS"
+    },
+    {
+      "file": "train_bpd_yolon_lfpn_step3.py",
+      "source_compile": "PASS"
+    },
+    {
+      "file": "train_yolo26s_step3.py",
+      "source_compile": "PASS"
+    },
+    {
+      "file": "01_YOLO26s_Step3_Colab_L4_V5_STRICT_FINAL.ipynb",
+      "nbformat": "PASS",
+      "embedded_engine_identity": "PASS",
+      "stale_outputs": 0,
+      "strict_training_guard": true
+    },
+    {
+      "file": "02_RTDETR_R18_Step3_Colab_L4_V5_STRICT_FINAL.ipynb",
+      "nbformat": "PASS",
+      "embedded_engine_identity": "PASS",
+      "stale_outputs": 0,
+      "strict_training_guard": true
+    },
+    {
+      "file": "03_BPD_YOLOn_LFPN_Step3_Colab_L4_V5_STRICT_FINAL.ipynb",
+      "nbformat": "PASS",
+      "embedded_engine_identity": "PASS",
+      "stale_outputs": 0,
+      "strict_training_guard": true
+    }
+  ]
+}
